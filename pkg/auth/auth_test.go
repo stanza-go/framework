@@ -637,6 +637,223 @@ func TestRequireScope_NoClaims(t *testing.T) {
 	}
 }
 
+// --- API Key Middleware Tests ---
+
+func validKeyValidator(keyHash string) (Claims, error) {
+	// Accept any key whose hash matches our test key hash.
+	expected := HashToken("stza_testkey123")
+	if keyHash == expected {
+		return Claims{
+			UID:    "apikey:42",
+			Scopes: []string{"read", "write"},
+		}, nil
+	}
+	return Claims{}, errors.New("key not found")
+}
+
+func TestRequireAPIKey_ValidKey(t *testing.T) {
+	t.Parallel()
+
+	var gotClaims Claims
+	var gotOK bool
+	handler := RequireAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClaims, gotOK = ClaimsFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer stza_testkey123")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if !gotOK {
+		t.Fatal("claims not found in context")
+	}
+	if gotClaims.UID != "apikey:42" {
+		t.Errorf("uid = %q, want apikey:42", gotClaims.UID)
+	}
+	if len(gotClaims.Scopes) != 2 {
+		t.Errorf("scopes = %v, want [read write]", gotClaims.Scopes)
+	}
+}
+
+func TestRequireAPIKey_NoHeader(t *testing.T) {
+	t.Parallel()
+
+	handler := RequireAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireAPIKey_InvalidKey(t *testing.T) {
+	t.Parallel()
+
+	handler := RequireAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer stza_wrongkey")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+
+	var body map[string]string
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "invalid api key" {
+		t.Errorf("error = %q, want 'invalid api key'", body["error"])
+	}
+}
+
+func TestRequireAPIKey_BadAuthScheme(t *testing.T) {
+	t.Parallel()
+
+	handler := RequireAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireAPIKey_EmptyBearer(t *testing.T) {
+	t.Parallel()
+
+	handler := RequireAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireAuthOrAPIKey_JWTFirst(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+	token, _ := a.IssueAccessToken("user-1", []string{"admin"})
+
+	var gotClaims Claims
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClaims, _ = ClaimsFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookie, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if gotClaims.UID != "user-1" {
+		t.Errorf("uid = %q, want user-1 (JWT should take precedence)", gotClaims.UID)
+	}
+}
+
+func TestRequireAuthOrAPIKey_FallbackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+
+	var gotClaims Claims
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClaims, _ = ClaimsFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Bearer stza_testkey123")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", rec.Code)
+	}
+	if gotClaims.UID != "apikey:42" {
+		t.Errorf("uid = %q, want apikey:42 (should fall back to API key)", gotClaims.UID)
+	}
+}
+
+func TestRequireAuthOrAPIKey_BothFail(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestBearerToken(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		header string
+		want   string
+		wantOK bool
+	}{
+		{"valid", "Bearer mytoken", "mytoken", true},
+		{"empty header", "", "", false},
+		{"no bearer prefix", "Basic abc", "", false},
+		{"bearer only", "Bearer ", "", false},
+		{"lowercase bearer", "bearer token", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			req := httptest.NewRequest("GET", "/", nil)
+			if tt.header != "" {
+				req.Header.Set("Authorization", tt.header)
+			}
+			got, ok := bearerToken(req)
+			if ok != tt.wantOK {
+				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
+			}
+			if got != tt.want {
+				t.Errorf("token = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 // --- Context Tests ---
 
 func TestClaimsFromContext_Empty(t *testing.T) {
