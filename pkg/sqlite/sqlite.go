@@ -60,10 +60,12 @@ const (
 //	    OnStop:  db.Stop,
 //	})
 type DB struct {
-	mu   sync.Mutex
-	db   *C.sqlite3
-	path string
-	opts []Option
+	mu             sync.Mutex
+	db             *C.sqlite3
+	path           string
+	opts           []Option
+	migrations     []Migration
+	lastBackupPath string
 }
 
 // Option configures a DB.
