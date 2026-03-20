@@ -1038,6 +1038,341 @@ func parseLogEntry(t *testing.T, data []byte) map[string]any {
 	return entry
 }
 
+// === CORS Middleware Tests ===
+
+func TestCORSPreflight(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("POST /api/login", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/login", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusNoContent {
+		t.Errorf("status = %d, want %d", w.Code, StatusNoContent)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:23705" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "http://localhost:23705")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got == "" {
+		t.Error("missing Allow-Methods header")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got == "" {
+		t.Error("missing Allow-Headers header")
+	}
+	if got := w.Header().Get("Access-Control-Max-Age"); got != "86400" {
+		t.Errorf("Max-Age = %q, want %q", got, "86400")
+	}
+	if got := w.Body.Len(); got != 0 {
+		t.Errorf("body length = %d, want 0", got)
+	}
+}
+
+func TestCORSActualRequest(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("GET /api/health", func(w ResponseWriter, req *Request) {
+		WriteJSON(w, StatusOK, map[string]string{"status": "ok"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:23705" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "http://localhost:23705")
+	}
+	if got := w.Header().Get("Vary"); got != "Origin" {
+		t.Errorf("Vary = %q, want %q", got, "Origin")
+	}
+}
+
+func TestCORSDisallowedOrigin(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("GET /api/health", func(w ResponseWriter, req *Request) {
+		WriteJSON(w, StatusOK, map[string]string{"status": "ok"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	req.Header.Set("Origin", "http://evil.com")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Allow-Origin = %q, want empty (origin not allowed)", got)
+	}
+}
+
+func TestCORSNoOriginHeader(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("GET /api/health", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/health", nil)
+	// No Origin header — same-origin request
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Allow-Origin = %q, want empty (no Origin header)", got)
+	}
+}
+
+func TestCORSWildcard(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"*"},
+	}))
+	r.HandleFunc("GET /api/public", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/public", nil)
+	req.Header.Set("Origin", "http://any-site.com")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "*")
+	}
+	if got := w.Header().Get("Vary"); got != "" {
+		t.Errorf("Vary = %q, want empty (wildcard origin)", got)
+	}
+}
+
+func TestCORSCredentials(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins:     []string{"http://localhost:23705"},
+		AllowCredentials: true,
+	}))
+	r.HandleFunc("GET /api/me", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/me", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Allow-Credentials = %q, want %q", got, "true")
+	}
+	// With credentials, origin must be echoed, not "*"
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:23705" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "http://localhost:23705")
+	}
+}
+
+func TestCORSCredentialsPreflight(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins:     []string{"http://localhost:23705"},
+		AllowCredentials: true,
+	}))
+	r.HandleFunc("POST /api/login", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/login", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusNoContent {
+		t.Errorf("status = %d, want %d", w.Code, StatusNoContent)
+	}
+	if got := w.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("Allow-Credentials = %q, want %q", got, "true")
+	}
+}
+
+func TestCORSCustomMethods(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+		AllowMethods: []string{"GET", "POST"},
+	}))
+	r.HandleFunc("POST /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Methods"); got != "GET, POST" {
+		t.Errorf("Allow-Methods = %q, want %q", got, "GET, POST")
+	}
+}
+
+func TestCORSCustomHeaders(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+		AllowHeaders: []string{"X-Custom", "Authorization"},
+	}))
+	r.HandleFunc("POST /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "X-Custom, Authorization" {
+		t.Errorf("Allow-Headers = %q, want %q", got, "X-Custom, Authorization")
+	}
+}
+
+func TestCORSCustomMaxAge(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+		MaxAge:       3600,
+	}))
+	r.HandleFunc("POST /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Access-Control-Max-Age"); got != "3600" {
+		t.Errorf("Max-Age = %q, want %q", got, "3600")
+	}
+}
+
+func TestCORSMultipleOrigins(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705", "http://localhost:23700"},
+	}))
+	r.HandleFunc("GET /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	tests := []struct {
+		origin string
+		want   string
+	}{
+		{"http://localhost:23705", "http://localhost:23705"},
+		{"http://localhost:23700", "http://localhost:23700"},
+		{"http://evil.com", ""},
+	}
+	for _, tt := range tests {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/api/data", nil)
+		req.Header.Set("Origin", tt.origin)
+		r.ServeHTTP(w, req)
+
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != tt.want {
+			t.Errorf("origin=%q: Allow-Origin = %q, want %q", tt.origin, got, tt.want)
+		}
+	}
+}
+
+func TestCORSPreflightDoesNotCallHandler(t *testing.T) {
+	called := false
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("POST /api/data", func(w ResponseWriter, req *Request) {
+		called = true
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	r.ServeHTTP(w, req)
+
+	if called {
+		t.Error("handler was called on preflight — should be short-circuited by CORS middleware")
+	}
+}
+
+func TestCORSOptionsWithoutPreflight(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{
+		AllowOrigins: []string{"http://localhost:23705"},
+	}))
+	r.HandleFunc("OPTIONS /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("custom-options"))
+	})
+
+	// OPTIONS with Origin but without Access-Control-Request-Method
+	// is NOT a preflight — should pass through to handler.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("OPTIONS", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	r.ServeHTTP(w, req)
+
+	if got := w.Body.String(); got != "custom-options" {
+		t.Errorf("body = %q, want %q", got, "custom-options")
+	}
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "http://localhost:23705" {
+		t.Errorf("Allow-Origin = %q, want %q", got, "http://localhost:23705")
+	}
+}
+
+func TestCORSEmptyConfig(t *testing.T) {
+	r := NewRouter()
+	r.Use(CORS(CORSConfig{}))
+	r.HandleFunc("GET /api/data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/data", nil)
+	req.Header.Set("Origin", "http://localhost:23705")
+	r.ServeHTTP(w, req)
+
+	// No origins configured — no CORS headers.
+	if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("Allow-Origin = %q, want empty (no origins configured)", got)
+	}
+	if got := w.Body.String(); got != "ok" {
+		t.Errorf("body = %q, want %q", got, "ok")
+	}
+}
+
 // === parsePattern Tests ===
 
 func TestParsePattern(t *testing.T) {

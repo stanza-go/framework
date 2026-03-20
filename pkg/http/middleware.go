@@ -2,6 +2,8 @@ package http
 
 import (
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/stanza-go/framework/pkg/log"
@@ -107,4 +109,110 @@ func (rec *responseRecorder) Write(b []byte) (int, error) {
 	n, err := rec.ResponseWriter.Write(b)
 	rec.written += int64(n)
 	return n, err
+}
+
+// CORSConfig configures the CORS middleware.
+type CORSConfig struct {
+	// AllowOrigins is the list of origins allowed to make cross-origin
+	// requests. Use "*" to allow all origins (not compatible with
+	// AllowCredentials). If empty, no CORS headers are set.
+	AllowOrigins []string
+
+	// AllowMethods is the list of HTTP methods allowed for cross-origin
+	// requests. Defaults to GET, POST, PUT, DELETE, PATCH, OPTIONS.
+	AllowMethods []string
+
+	// AllowHeaders is the list of HTTP headers the client may send in
+	// cross-origin requests. Defaults to Origin, Content-Type, Accept,
+	// Authorization.
+	AllowHeaders []string
+
+	// AllowCredentials indicates whether the response can include
+	// credentials (cookies, HTTP authentication, client certificates).
+	// When true, AllowOrigins must not contain "*".
+	AllowCredentials bool
+
+	// MaxAge is the duration in seconds that preflight results can be
+	// cached by the browser. Defaults to 86400 (24 hours).
+	MaxAge int
+}
+
+// CORS returns middleware that handles Cross-Origin Resource Sharing.
+// It responds to preflight OPTIONS requests with the configured CORS
+// headers and a 204 status, and adds CORS headers to all other
+// cross-origin requests.
+//
+// For development with Vite (admin on :23705, API on :23710):
+//
+//	r.Use(http.CORS(http.CORSConfig{
+//	    AllowOrigins:     []string{"http://localhost:23705"},
+//	    AllowCredentials: true,
+//	}))
+//
+// CORS should be added after RequestLogger (so preflights are logged)
+// and before Recovery:
+//
+//	r.Use(http.RequestLogger(logger))
+//	r.Use(http.CORS(corsConfig))
+//	r.Use(http.Recovery(onPanic))
+func CORS(cfg CORSConfig) Middleware {
+	if len(cfg.AllowMethods) == 0 {
+		cfg.AllowMethods = []string{"GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"}
+	}
+	if len(cfg.AllowHeaders) == 0 {
+		cfg.AllowHeaders = []string{"Origin", "Content-Type", "Accept", "Authorization"}
+	}
+	if cfg.MaxAge == 0 {
+		cfg.MaxAge = 86400
+	}
+
+	methods := strings.Join(cfg.AllowMethods, ", ")
+	headers := strings.Join(cfg.AllowHeaders, ", ")
+	maxAge := strconv.Itoa(cfg.MaxAge)
+
+	origins := make(map[string]bool, len(cfg.AllowOrigins))
+	allowAll := false
+	for _, o := range cfg.AllowOrigins {
+		if o == "*" {
+			allowAll = true
+		}
+		origins[o] = true
+	}
+
+	return func(next Handler) Handler {
+		return HandlerFunc(func(w ResponseWriter, r *Request) {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if !allowAll && !origins[origin] {
+				next.ServeHTTP(w, r)
+				return
+			}
+
+			if allowAll && !cfg.AllowCredentials {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+
+			if cfg.AllowCredentials {
+				w.Header().Set("Access-Control-Allow-Credentials", "true")
+			}
+
+			// Preflight request: respond immediately without calling next.
+			if r.Method == "OPTIONS" && r.Header.Get("Access-Control-Request-Method") != "" {
+				w.Header().Set("Access-Control-Allow-Methods", methods)
+				w.Header().Set("Access-Control-Allow-Headers", headers)
+				w.Header().Set("Access-Control-Max-Age", maxAge)
+				w.WriteHeader(StatusNoContent)
+				return
+			}
+
+			next.ServeHTTP(w, r)
+		})
+	}
 }
