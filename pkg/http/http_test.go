@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	"github.com/stanza-go/framework/pkg/log"
 )
@@ -1370,6 +1371,154 @@ func TestCORSEmptyConfig(t *testing.T) {
 	}
 	if got := w.Body.String(); got != "ok" {
 		t.Errorf("body = %q, want %q", got, "ok")
+	}
+}
+
+// === Static Handler Tests ===
+
+func TestStaticServesFile(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html":       {Data: []byte("<html>app</html>")},
+		"assets/style.css": {Data: []byte("body{}")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /{path...}", Static(fsys))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/assets/style.css", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Body.String(); got != "body{}" {
+		t.Errorf("body = %q, want %q", got, "body{}")
+	}
+}
+
+func TestStaticRootServesIndex(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html": {Data: []byte("<html>root</html>")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /{path...}", Static(fsys))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "<html>root</html>") {
+		t.Errorf("body = %q, want to contain index.html content", w.Body.String())
+	}
+}
+
+func TestStaticSPAFallback(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html": {Data: []byte("<html>spa</html>")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /{path...}", Static(fsys))
+
+	// Request a path without a file extension — should serve index.html.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/dashboard", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "<html>spa</html>") {
+		t.Errorf("body = %q, want SPA fallback with index.html", w.Body.String())
+	}
+}
+
+func TestStaticSPAFallbackNestedPath(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html": {Data: []byte("<html>spa</html>")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /{path...}", Static(fsys))
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/users/123/edit", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "<html>spa</html>") {
+		t.Errorf("body = %q, want SPA fallback", w.Body.String())
+	}
+}
+
+func TestStaticMissingAsset404(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html": {Data: []byte("<html>app</html>")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /{path...}", Static(fsys))
+
+	// Request a non-existent file WITH extension — should return 404.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/missing.js", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusNotFound {
+		t.Errorf("status = %d, want %d", w.Code, StatusNotFound)
+	}
+}
+
+func TestStaticWithPrefix(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html":       {Data: []byte("<html>admin</html>")},
+		"assets/app.js":    {Data: []byte("console.log('hi')")},
+	}
+
+	mux := nethttp.NewServeMux()
+	mux.Handle("GET /admin/{path...}", Static(fsys))
+
+	// Serve index via prefix root.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/admin/", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "<html>admin</html>") {
+		t.Errorf("body = %q, want admin index", w.Body.String())
+	}
+
+	// Serve asset under prefix.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/admin/assets/app.js", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Body.String(); got != "console.log('hi')" {
+		t.Errorf("body = %q, want js content", got)
+	}
+
+	// SPA fallback under prefix.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/admin/settings", nil)
+	mux.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Errorf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if !strings.Contains(w.Body.String(), "<html>admin</html>") {
+		t.Errorf("body = %q, want SPA fallback", w.Body.String())
 	}
 }
 
