@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/stanza-go/framework/pkg/log"
 )
 
 // === Router Tests ===
@@ -856,6 +858,184 @@ func TestFullStack(t *testing.T) {
 			t.Errorf("status = %d, want %d", w.Code, StatusBadRequest)
 		}
 	})
+}
+
+// === RequestLogger Middleware Tests ===
+
+func TestRequestLoggerInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	r := NewRouter()
+	r.Use(RequestLogger(logger))
+	r.HandleFunc("GET /ok", func(w ResponseWriter, req *Request) {
+		WriteJSON(w, StatusOK, map[string]string{"status": "ok"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/ok", nil)
+	req.RemoteAddr = "192.168.1.1:12345"
+	r.ServeHTTP(w, req)
+
+	entry := parseLogEntry(t, buf.Bytes())
+	if entry["level"] != "info" {
+		t.Errorf("level = %q, want %q", entry["level"], "info")
+	}
+	if entry["msg"] != "http request" {
+		t.Errorf("msg = %q, want %q", entry["msg"], "http request")
+	}
+	if entry["method"] != "GET" {
+		t.Errorf("method = %q, want %q", entry["method"], "GET")
+	}
+	if entry["path"] != "/ok" {
+		t.Errorf("path = %q, want %q", entry["path"], "/ok")
+	}
+	if status, ok := entry["status"].(float64); !ok || int(status) != 200 {
+		t.Errorf("status = %v, want 200", entry["status"])
+	}
+	if entry["remote"] != "192.168.1.1:12345" {
+		t.Errorf("remote = %q, want %q", entry["remote"], "192.168.1.1:12345")
+	}
+	if _, ok := entry["duration"]; !ok {
+		t.Error("missing duration field")
+	}
+	if b, ok := entry["bytes"].(float64); !ok || b == 0 {
+		t.Errorf("bytes = %v, want > 0", entry["bytes"])
+	}
+}
+
+func TestRequestLoggerError(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	r := NewRouter()
+	r.Use(RequestLogger(logger))
+	r.HandleFunc("POST /fail", func(w ResponseWriter, req *Request) {
+		WriteError(w, StatusInternalServerError, "something broke")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/fail", nil)
+	r.ServeHTTP(w, req)
+
+	entry := parseLogEntry(t, buf.Bytes())
+	if entry["level"] != "error" {
+		t.Errorf("level = %q, want %q", entry["level"], "error")
+	}
+	if entry["method"] != "POST" {
+		t.Errorf("method = %q, want %q", entry["method"], "POST")
+	}
+	if status, ok := entry["status"].(float64); !ok || int(status) != 500 {
+		t.Errorf("status = %v, want 500", entry["status"])
+	}
+}
+
+func TestRequestLoggerWithRecovery(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	r := NewRouter()
+	r.Use(RequestLogger(logger))
+	r.Use(Recovery(nil))
+	r.HandleFunc("GET /panic", func(w ResponseWriter, req *Request) {
+		panic("boom")
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/panic", nil)
+	r.ServeHTTP(w, req)
+
+	entry := parseLogEntry(t, buf.Bytes())
+	if entry["level"] != "error" {
+		t.Errorf("level = %q, want %q", entry["level"], "error")
+	}
+	if status, ok := entry["status"].(float64); !ok || int(status) != 500 {
+		t.Errorf("status = %v, want 500", entry["status"])
+	}
+}
+
+func TestRequestLogger404(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	r := NewRouter()
+	r.Use(RequestLogger(logger))
+	r.HandleFunc("GET /exists", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/nope", nil)
+	r.ServeHTTP(w, req)
+
+	entry := parseLogEntry(t, buf.Bytes())
+	if entry["level"] != "info" {
+		t.Errorf("level = %q, want %q", entry["level"], "info")
+	}
+	if status, ok := entry["status"].(float64); !ok || int(status) != 404 {
+		t.Errorf("status = %v, want 404", entry["status"])
+	}
+}
+
+// === responseRecorder Tests ===
+
+func TestResponseRecorderDefaults(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &responseRecorder{ResponseWriter: w, status: StatusOK}
+
+	rec.Write([]byte("hello"))
+
+	if rec.status != StatusOK {
+		t.Errorf("status = %d, want %d", rec.status, StatusOK)
+	}
+	if rec.written != 5 {
+		t.Errorf("written = %d, want 5", rec.written)
+	}
+}
+
+func TestResponseRecorderExplicitStatus(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &responseRecorder{ResponseWriter: w, status: StatusOK}
+
+	rec.WriteHeader(StatusNotFound)
+	rec.Write([]byte("not found"))
+
+	if rec.status != StatusNotFound {
+		t.Errorf("status = %d, want %d", rec.status, StatusNotFound)
+	}
+	if rec.written != 9 {
+		t.Errorf("written = %d, want 9", rec.written)
+	}
+}
+
+func TestResponseRecorderDoubleWriteHeader(t *testing.T) {
+	w := httptest.NewRecorder()
+	rec := &responseRecorder{ResponseWriter: w, status: StatusOK}
+
+	rec.WriteHeader(StatusCreated)
+	rec.WriteHeader(StatusBadRequest) // second call — status should not change
+
+	if rec.status != StatusCreated {
+		t.Errorf("status = %d, want %d (first call wins)", rec.status, StatusCreated)
+	}
+}
+
+// newTestLogger creates a logger that writes to the given buffer at debug level.
+func newTestLogger(buf *bytes.Buffer) *log.Logger {
+	return log.New(
+		log.WithLevel(log.LevelDebug),
+		log.WithWriter(buf),
+	)
+}
+
+// parseLogEntry parses a single JSON log line into a map.
+func parseLogEntry(t *testing.T, data []byte) map[string]any {
+	t.Helper()
+	var entry map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(data), &entry); err != nil {
+		t.Fatalf("failed to parse log entry: %v\nraw: %s", err, data)
+	}
+	return entry
 }
 
 // === parsePattern Tests ===
