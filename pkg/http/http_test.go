@@ -2,6 +2,7 @@ package http
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -2303,5 +2304,349 @@ func TestGenerateUUIDFormat(t *testing.T) {
 		if v != '8' && v != '9' && v != 'a' && v != 'b' {
 			t.Errorf("variant char = %c, want 8/9/a/b", v)
 		}
+	}
+}
+
+// === Compress Middleware Tests ===
+
+// gzipDecode decompresses gzipped bytes for test assertions.
+func gzipDecode(t *testing.T, data []byte) string {
+	t.Helper()
+	gr, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("gzip.NewReader: %v", err)
+	}
+	defer gr.Close()
+	out, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	return string(out)
+}
+
+func TestCompressJSONAboveMinSize(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		body := strings.Repeat(`{"key":"value"},`, 100) // ~1600 bytes
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want %q", got, "gzip")
+	}
+	if got := w.Header().Get("Vary"); got != "Accept-Encoding" {
+		t.Errorf("Vary = %q, want %q", got, "Accept-Encoding")
+	}
+
+	decoded := gzipDecode(t, w.Body.Bytes())
+	want := strings.Repeat(`{"key":"value"},`, 100)
+	if decoded != want {
+		t.Errorf("decoded body length = %d, want %d", len(decoded), len(want))
+	}
+
+	// Compressed should be smaller than original.
+	if w.Body.Len() >= len(want) {
+		t.Errorf("compressed size %d >= original %d", w.Body.Len(), len(want))
+	}
+}
+
+func TestCompressSkipsBelowMinSize(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /small", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"ok":true}`))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/small", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want empty (below min size)", got)
+	}
+	if got := w.Body.String(); got != `{"ok":true}` {
+		t.Errorf("body = %q, want raw JSON", got)
+	}
+}
+
+func TestCompressSkipsNoAcceptEncoding(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		body := strings.Repeat("x", 2000)
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	// No Accept-Encoding header.
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want empty (no Accept-Encoding)", got)
+	}
+	if w.Body.Len() != 2000 {
+		t.Errorf("body length = %d, want 2000", w.Body.Len())
+	}
+}
+
+func TestCompressSkipsBinaryContentType(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /image", func(w ResponseWriter, req *Request) {
+		body := strings.Repeat("\x00", 2000)
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/image", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("Content-Encoding = %q, want empty (binary type)", got)
+	}
+}
+
+func TestCompressTextHTML(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /page", func(w ResponseWriter, req *Request) {
+		body := "<html>" + strings.Repeat("<p>paragraph</p>", 200) + "</html>"
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/page", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want %q", got, "gzip")
+	}
+
+	decoded := gzipDecode(t, w.Body.Bytes())
+	want := "<html>" + strings.Repeat("<p>paragraph</p>", 200) + "</html>"
+	if decoded != want {
+		t.Errorf("decoded length = %d, want %d", len(decoded), len(want))
+	}
+}
+
+func TestCompressCustomMinSize(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{MinSize: 50}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(strings.Repeat("a", 100)))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want %q (above custom min)", got, "gzip")
+	}
+}
+
+func TestCompressCustomContentTypes(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{
+		MinSize:      50,
+		ContentTypes: []string{"application/vnd.custom"},
+	}))
+	r.HandleFunc("GET /custom", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/vnd.custom+json")
+		w.Write([]byte(strings.Repeat("x", 200)))
+	})
+	r.HandleFunc("GET /json", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(strings.Repeat("x", 200)))
+	})
+
+	// Custom type should be compressed.
+	w1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest("GET", "/custom", nil)
+	req1.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w1, req1)
+	if got := w1.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Errorf("custom type: Content-Encoding = %q, want gzip", got)
+	}
+
+	// JSON should NOT be compressed (not in custom list).
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/json", nil)
+	req2.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w2, req2)
+	if got := w2.Header().Get("Content-Encoding"); got != "" {
+		t.Errorf("json type: Content-Encoding = %q, want empty (not in custom list)", got)
+	}
+}
+
+func TestCompressRemovesContentLength(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		body := strings.Repeat("z", 2000)
+		w.Header().Set("Content-Type", "text/plain")
+		w.Header().Set("Content-Length", "2000")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	if got := w.Header().Get("Content-Length"); got != "" {
+		t.Errorf("Content-Length = %q, want empty (removed by compress)", got)
+	}
+}
+
+func TestCompressMultipleWrites(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{MinSize: 50}))
+	r.HandleFunc("GET /multi", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		// Write in multiple small chunks that together exceed minSize.
+		for i := 0; i < 20; i++ {
+			w.Write([]byte(strings.Repeat("x", 10)))
+		}
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/multi", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+
+	decoded := gzipDecode(t, w.Body.Bytes())
+	if len(decoded) != 200 {
+		t.Errorf("decoded length = %d, want 200", len(decoded))
+	}
+}
+
+func TestCompressPreservesStatusCode(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{MinSize: 10}))
+	r.HandleFunc("GET /created", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(StatusCreated)
+		w.Write([]byte(strings.Repeat(`{"id":1}`, 20)))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/created", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusCreated {
+		t.Errorf("status = %d, want %d", w.Code, StatusCreated)
+	}
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+}
+
+func TestCompressCustomLevel(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{Level: gzip.BestSpeed}))
+	body := strings.Repeat("hello world ", 200)
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(body))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+	decoded := gzipDecode(t, w.Body.Bytes())
+	if decoded != body {
+		t.Errorf("decoded body mismatch")
+	}
+}
+
+func TestCompressSVG(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	svg := "<svg>" + strings.Repeat(`<rect width="10" height="10"/>`, 100) + "</svg>"
+	r.HandleFunc("GET /icon.svg", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "image/svg+xml")
+		w.Write([]byte(svg))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/icon.svg", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip (SVG is text)", got)
+	}
+}
+
+func TestCompressAcceptEncodingVariants(t *testing.T) {
+	handler := func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.Write([]byte(strings.Repeat("a", 2000)))
+	}
+
+	tests := []struct {
+		name     string
+		encoding string
+		want     bool
+	}{
+		{"gzip only", "gzip", true},
+		{"gzip with others", "deflate, gzip, br", true},
+		{"gzip with quality", "gzip, deflate", true},
+		{"no gzip", "deflate, br", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := NewRouter()
+			r.Use(Compress(CompressConfig{}))
+			r.HandleFunc("GET /data", handler)
+
+			w := httptest.NewRecorder()
+			req := httptest.NewRequest("GET", "/data", nil)
+			if tt.encoding != "" {
+				req.Header.Set("Accept-Encoding", tt.encoding)
+			}
+			r.ServeHTTP(w, req)
+
+			got := w.Header().Get("Content-Encoding") == "gzip"
+			if got != tt.want {
+				t.Errorf("compressed = %v, want %v for Accept-Encoding %q", got, tt.want, tt.encoding)
+			}
+		})
 	}
 }
