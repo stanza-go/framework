@@ -7,9 +7,11 @@ import (
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/stanza-go/framework/pkg/log"
 )
@@ -1703,5 +1705,406 @@ func TestSecureHeadersFullConfig(t *testing.T) {
 		if got := w.Header().Get(header); got != want {
 			t.Errorf("%s = %q, want %q", header, got, want)
 		}
+	}
+}
+
+// === RateLimit Tests ===
+
+func TestRateLimitAllowsUnderLimit(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 5, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	for i := range 5 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		r.ServeHTTP(w, req)
+
+		if w.Code != StatusOK {
+			t.Fatalf("request %d: status = %d, want %d", i+1, w.Code, StatusOK)
+		}
+		if got := w.Body.String(); got != "ok" {
+			t.Fatalf("request %d: body = %q, want %q", i+1, got, "ok")
+		}
+	}
+}
+
+func TestRateLimitBlocksOverLimit(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 3, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// First 3 requests should pass.
+	for i := range 3 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		r.ServeHTTP(w, req)
+
+		if w.Code != StatusOK {
+			t.Fatalf("request %d: status = %d, want %d", i+1, w.Code, StatusOK)
+		}
+	}
+
+	// 4th request should be blocked.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "rate limit exceeded" {
+		t.Errorf("error = %q, want %q", body["error"], "rate limit exceeded")
+	}
+}
+
+func TestRateLimitHeaders(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 5, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// First request: remaining should be limit-1.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-RateLimit-Limit"); got != "5" {
+		t.Errorf("X-RateLimit-Limit = %q, want %q", got, "5")
+	}
+	if got := w.Header().Get("X-RateLimit-Remaining"); got != "4" {
+		t.Errorf("X-RateLimit-Remaining = %q, want %q", got, "4")
+	}
+	if got := w.Header().Get("X-RateLimit-Reset"); got == "" {
+		t.Error("X-RateLimit-Reset header is empty")
+	}
+}
+
+func TestRateLimitRetryAfterHeader(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 1, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// Exhaust the limit.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	// Next request should have Retry-After.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+	retryAfter := w.Header().Get("Retry-After")
+	if retryAfter == "" {
+		t.Fatal("Retry-After header is empty")
+	}
+	seconds, err := strconv.Atoi(retryAfter)
+	if err != nil {
+		t.Fatalf("Retry-After %q is not an integer: %v", retryAfter, err)
+	}
+	if seconds < 1 || seconds > 60 {
+		t.Errorf("Retry-After = %d, want 1..60", seconds)
+	}
+}
+
+func TestRateLimitPerIPIsolation(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 2, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// Exhaust limit for IP A.
+	for range 2 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		r.ServeHTTP(w, req)
+	}
+
+	// IP A is blocked.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("IP A: status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+
+	// IP B should still be allowed.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.2:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("IP B: status = %d, want %d", w.Code, StatusOK)
+	}
+}
+
+func TestRateLimitWindowReset(t *testing.T) {
+	window := 50 * time.Millisecond
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 1, Window: window}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// First request passes.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("first: status = %d, want %d", w.Code, StatusOK)
+	}
+
+	// Second request blocked.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("second: status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+
+	// Wait for window to expire.
+	time.Sleep(window + 10*time.Millisecond)
+
+	// Request should pass again.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("after reset: status = %d, want %d", w.Code, StatusOK)
+	}
+}
+
+func TestRateLimitCustomMessage(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{
+		Limit:   1,
+		Window:  time.Minute,
+		Message: "slow down",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// Exhaust limit.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	// Check custom message.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+
+	var body map[string]string
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if body["error"] != "slow down" {
+		t.Errorf("error = %q, want %q", body["error"], "slow down")
+	}
+}
+
+func TestRateLimitCustomKeyFunc(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{
+		Limit:  2,
+		Window: time.Minute,
+		KeyFunc: func(r *Request) string {
+			return r.Header.Get("X-API-Key")
+		},
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// Exhaust limit for key "abc".
+	for range 2 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.Header.Set("X-API-Key", "abc")
+		r.ServeHTTP(w, req)
+	}
+
+	// Key "abc" blocked.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-API-Key", "abc")
+	r.ServeHTTP(w, req)
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("key abc: status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+
+	// Key "xyz" still allowed.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-API-Key", "xyz")
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("key xyz: status = %d, want %d", w.Code, StatusOK)
+	}
+}
+
+func TestRateLimitDefaults(t *testing.T) {
+	// Zero-value config should use defaults (60 req/min).
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	// 60 requests should all pass.
+	for i := range 60 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		r.ServeHTTP(w, req)
+
+		if w.Code != StatusOK {
+			t.Fatalf("request %d: status = %d, want %d", i+1, w.Code, StatusOK)
+		}
+	}
+
+	// 61st should be blocked.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("request 61: status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+}
+
+func TestRateLimitRemainingDecrement(t *testing.T) {
+	r := NewRouter()
+	r.Use(RateLimit(RateLimitConfig{Limit: 3, Window: time.Minute}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	expected := []string{"2", "1", "0"}
+	for i, want := range expected {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		req.RemoteAddr = "10.0.0.1:12345"
+		r.ServeHTTP(w, req)
+
+		got := w.Header().Get("X-RateLimit-Remaining")
+		if got != want {
+			t.Errorf("request %d: X-RateLimit-Remaining = %q, want %q", i+1, got, want)
+		}
+	}
+
+	// Blocked request should also show remaining=0.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if got := w.Header().Get("X-RateLimit-Remaining"); got != "0" {
+		t.Errorf("blocked request: X-RateLimit-Remaining = %q, want %q", got, "0")
+	}
+}
+
+func TestClientIPXForwardedFor(t *testing.T) {
+	tests := []struct {
+		name   string
+		xff    string
+		xri    string
+		remote string
+		want   string
+	}{
+		{"single XFF", "1.2.3.4", "", "9.9.9.9:1234", "1.2.3.4"},
+		{"multi XFF", "1.2.3.4, 5.6.7.8, 9.10.11.12", "", "9.9.9.9:1234", "1.2.3.4"},
+		{"XRI fallback", "", "5.6.7.8", "9.9.9.9:1234", "5.6.7.8"},
+		{"RemoteAddr fallback", "", "", "9.9.9.9:1234", "9.9.9.9"},
+		{"RemoteAddr no port", "", "", "9.9.9.9", "9.9.9.9"},
+		{"XFF with spaces", " 1.2.3.4 , 5.6.7.8 ", "", "9.9.9.9:1234", "1.2.3.4"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/", nil)
+			req.RemoteAddr = tt.remote
+			if tt.xff != "" {
+				req.Header.Set("X-Forwarded-For", tt.xff)
+			}
+			if tt.xri != "" {
+				req.Header.Set("X-Real-IP", tt.xri)
+			}
+			got := ClientIP(req)
+			if got != tt.want {
+				t.Errorf("ClientIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRateLimitOnGroup(t *testing.T) {
+	r := NewRouter()
+	limited := r.Group("/limited")
+	limited.Use(RateLimit(RateLimitConfig{Limit: 1, Window: time.Minute}))
+	limited.HandleFunc("GET /endpoint", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("limited"))
+	})
+
+	// Unlimited route on the same router.
+	r.HandleFunc("GET /free", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("free"))
+	})
+
+	// First limited request passes.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/limited/endpoint", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("limited first: status = %d, want %d", w.Code, StatusOK)
+	}
+
+	// Second limited request blocked.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/limited/endpoint", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusTooManyRequests {
+		t.Fatalf("limited second: status = %d, want %d", w.Code, StatusTooManyRequests)
+	}
+
+	// Unlimited route still works for the same IP.
+	w = httptest.NewRecorder()
+	req = httptest.NewRequest("GET", "/free", nil)
+	req.RemoteAddr = "10.0.0.1:12345"
+	r.ServeHTTP(w, req)
+	if w.Code != StatusOK {
+		t.Fatalf("free: status = %d, want %d", w.Code, StatusOK)
 	}
 }
