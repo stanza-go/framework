@@ -29,6 +29,7 @@ package validate
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -190,26 +191,7 @@ func Check(field string, ok bool, message string) *FieldError {
 	return nil
 }
 
-// itoa converts an int to a string without importing strconv.
+// itoa converts an int to its string representation.
 func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := false
-	if n < 0 {
-		neg = true
-		n = -n
-	}
-	buf := [20]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
+	return strconv.Itoa(n)
 }

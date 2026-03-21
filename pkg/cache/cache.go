@@ -130,28 +130,20 @@ func New[V any](opts ...Option[V]) *Cache[V] {
 // expired, or the zero value and false otherwise. Accessing an entry updates
 // its last-accessed time for LRU purposes.
 func (c *Cache[V]) Get(key string) (V, bool) {
-	c.mu.RLock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	e, ok := c.items[key]
 	if !ok {
-		c.mu.RUnlock()
 		var zero V
 		return zero, false
 	}
 	if c.now().After(e.expiresAt) {
-		c.mu.RUnlock()
-		c.Delete(key)
+		c.deleteLocked(key)
 		var zero V
 		return zero, false
 	}
-	c.mu.RUnlock()
-
-	// Update access time under write lock.
-	c.mu.Lock()
-	if e, ok := c.items[key]; ok {
-		e.accessedAt = c.now()
-	}
-	c.mu.Unlock()
-
+	e.accessedAt = c.now()
 	return e.value, true
 }
 

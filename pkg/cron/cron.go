@@ -361,7 +361,7 @@ func (s *Scheduler) execute(ctx context.Context, j *job) {
 	start := time.Now()
 	s.logInfo("cron job started", log.String("job", j.name))
 
-	err := j.fn(ctx)
+	err := s.safeRun(ctx, j)
 
 	elapsed := time.Since(start)
 
@@ -397,6 +397,18 @@ func (s *Scheduler) execute(ctx context.Context, j *job) {
 		log.String("job", j.name),
 		log.Duration("elapsed", elapsed),
 	)
+}
+
+// safeRun executes the job function with panic recovery. If the function
+// panics, the panic is caught and returned as an error instead of crashing
+// the scheduler goroutine.
+func (s *Scheduler) safeRun(ctx context.Context, j *job) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return j.fn(ctx)
 }
 
 func (s *Scheduler) logInfo(msg string, fields ...log.Field) {

@@ -570,7 +570,7 @@ func (q *Queue) poll(ctx context.Context, workerID int) {
 		return
 	}
 
-	err := handler(ctx, job.Payload)
+	err := q.safeHandle(ctx, handler, job.Payload)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -590,6 +590,18 @@ func (q *Queue) poll(ctx context.Context, workerID int) {
 		log.String("type", job.Type),
 		log.Duration("elapsed", elapsed),
 	)
+}
+
+// safeHandle executes the handler with panic recovery. If the handler panics,
+// the panic is caught and returned as an error instead of crashing the worker
+// goroutine.
+func (q *Queue) safeHandle(ctx context.Context, handler HandlerFunc, payload []byte) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v", r)
+		}
+	}()
+	return handler(ctx, payload)
 }
 
 // claim atomically picks the next available job and marks it as running.

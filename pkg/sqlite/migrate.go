@@ -218,12 +218,16 @@ func (db *DB) backupBeforeMigrate() error {
 		return err
 	}
 
+	db.mu.Lock()
 	db.lastBackupPath = backupPath
+	db.mu.Unlock()
 	return nil
 }
 
 // LastBackupPath returns the path of the most recent pre-migration
 // backup, or an empty string if no backup was made.
 func (db *DB) LastBackupPath() string {
+	db.mu.Lock()
+	defer db.mu.Unlock()
 	return db.lastBackupPath
 }

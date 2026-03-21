@@ -119,10 +119,6 @@ func (fw *FileWriter) open() error {
 }
 
 func (fw *FileWriter) rotate(today string) error {
-	if fw.file != nil {
-		_ = fw.file.Close()
-	}
-
 	current := filepath.Join(fw.dir, "stanza.log")
 	if _, err := os.Stat(current); err == nil && fw.size > 0 {
 		dated := filepath.Join(fw.dir, fmt.Sprintf("stanza-%s.log", fw.curDate))
@@ -139,9 +135,15 @@ func (fw *FileWriter) rotate(today string) error {
 
 	fw.prune()
 
+	// Open the new file before closing the old one so fw.file is never nil
+	// on error.
 	f, err := os.OpenFile(current, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
 		return fmt.Errorf("log: open new file: %w", err)
+	}
+
+	if fw.file != nil {
+		_ = fw.file.Close()
 	}
 
 	fw.file = f
