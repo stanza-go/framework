@@ -26,6 +26,13 @@ func withClaims(ctx context.Context, claims Claims) context.Context {
 	return context.WithValue(ctx, claimsKey, claims)
 }
 
+// WithClaimsForTest is an exported version of withClaims for use in
+// integration tests that need to set up authenticated request contexts
+// without going through the middleware stack.
+func WithClaimsForTest(ctx context.Context, claims Claims) context.Context {
+	return withClaims(ctx, claims)
+}
+
 // RequireAuth returns middleware that validates the JWT access token
 // from the request cookie. If the token is valid, the claims are
 // stored in the request context and the next handler is called. If
