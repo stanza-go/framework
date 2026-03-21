@@ -1,9 +1,12 @@
 package http
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"hash/crc32"
+	"net"
+	nethttp "net/http"
 	"strings"
 )
 
@@ -66,6 +69,7 @@ type etagWriter struct {
 	buf         *bytes.Buffer
 	status      int
 	wroteHeader bool
+	hijacked    bool
 }
 
 // Unwrap returns the underlying ResponseWriter. This allows middleware
@@ -73,6 +77,18 @@ type etagWriter struct {
 // original writer and its Hijacker interface.
 func (ew *etagWriter) Unwrap() ResponseWriter {
 	return ew.ResponseWriter
+}
+
+// Hijack implements net/http.Hijacker. It marks the writer as hijacked
+// so that finish is a no-op, then delegates to the underlying writer's
+// Hijack.
+func (ew *etagWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := ew.ResponseWriter.(nethttp.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("http: underlying ResponseWriter does not implement Hijacker")
+	}
+	ew.hijacked = true
+	return hj.Hijack()
 }
 
 // WriteHeader captures the status code without forwarding it.
@@ -95,6 +111,10 @@ func (ew *etagWriter) Write(b []byte) (int, error) {
 // finish computes the ETag, checks If-None-Match, and writes the
 // response (either 304 or the full body with ETag header).
 func (ew *etagWriter) finish() {
+	if ew.hijacked {
+		return
+	}
+
 	if !ew.wroteHeader {
 		ew.WriteHeader(StatusOK)
 	}

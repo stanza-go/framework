@@ -1,8 +1,12 @@
 package http
 
 import (
+	"bufio"
 	"compress/gzip"
+	"fmt"
 	"io"
+	"net"
+	nethttp "net/http"
 	"strings"
 	"sync"
 )
@@ -115,6 +119,7 @@ type compressWriter struct {
 	compressed  bool
 	status      int
 	wroteHeader bool
+	hijacked    bool
 }
 
 // WriteHeader captures the status code. The actual header write is
@@ -207,10 +212,26 @@ func (cw *compressWriter) Unwrap() ResponseWriter {
 	return cw.ResponseWriter
 }
 
+// Hijack implements net/http.Hijacker. It marks the writer as hijacked
+// so that Close and flush are no-ops, then delegates to the underlying
+// writer's Hijack.
+func (cw *compressWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := cw.ResponseWriter.(nethttp.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("http: underlying ResponseWriter does not implement Hijacker")
+	}
+	cw.hijacked = true
+	return hj.Hijack()
+}
+
 // Close finalizes the response. If compression was not decided yet
 // (response smaller than minSize), it flushes uncompressed. If a gzip
 // writer was started, it flushes and returns it to the pool.
 func (cw *compressWriter) Close() {
+	if cw.hijacked {
+		return
+	}
+
 	if !cw.decided {
 		cw.decide()
 		_ = cw.flush()

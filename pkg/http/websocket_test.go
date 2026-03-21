@@ -2,6 +2,7 @@ package http
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -1574,6 +1575,135 @@ func TestUpgraderCustomBufferSizes(t *testing.T) {
 	if string(payload) != "custom-buf" {
 		t.Errorf("payload = %q, want %q", payload, "custom-buf")
 	}
+}
+
+// TestUpgradeThroughMiddlewareWrappers verifies that WebSocket upgrade
+// works through responseRecorder and etagWriter without producing
+// "response.WriteHeader on hijacked connection" log spam. The wrappers
+// implement Hijacker, so the hijack cascades and deferred cleanup
+// (etagWriter.finish, compressWriter.Close) skips WriteHeader calls.
+func TestUpgradeThroughMiddlewareWrappers(t *testing.T) {
+	// Capture stderr to detect the "response.WriteHeader on hijacked
+	// connection" message that net/http logs.
+	handler := nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		// Simulate the middleware chain: responseRecorder → etagWriter.
+		rec := &responseRecorder{ResponseWriter: w, status: StatusOK}
+		ew := &etagWriter{
+			ResponseWriter: rec,
+			buf:            &bytes.Buffer{},
+		}
+
+		// WebSocket handler.
+		upgrader := Upgrader{}
+		conn, err := upgrader.Upgrade(ew, r)
+		if err != nil {
+			t.Logf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+
+		mt, data, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		_ = conn.WriteMessage(mt, data)
+
+		// Simulate deferred cleanup that ETag middleware does.
+		ew.finish()
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	conn, err := net.Dial("tcp", srv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	key := GenerateKey()
+	req := fmt.Sprintf(
+		"GET / HTTP/1.1\r\n"+
+			"Host: %s\r\n"+
+			"Upgrade: websocket\r\n"+
+			"Connection: Upgrade\r\n"+
+			"Sec-WebSocket-Key: %s\r\n"+
+			"Sec-WebSocket-Version: 13\r\n"+
+			"\r\n",
+		srv.Listener.Addr().String(), key,
+	)
+	conn.Write([]byte(req))
+
+	br := bufio.NewReader(conn)
+	resp, err := nethttp.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 101 {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+
+	// Verify the hijack flags were set on both wrappers.
+	if err := writeClientFrame(conn, true, 0x1, []byte("through-middleware")); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	_, _, payload, err := readServerFrame(br)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(payload) != "through-middleware" {
+		t.Errorf("payload = %q, want %q", payload, "through-middleware")
+	}
+}
+
+// TestHijackCascadesThroughWrappers verifies that calling Hijack on the
+// outermost wrapper sets the hijacked flag on every wrapper in the chain.
+func TestHijackCascadesThroughWrappers(t *testing.T) {
+	done := make(chan struct{})
+
+	handler := nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		defer close(done)
+
+		rec := &responseRecorder{ResponseWriter: w, status: StatusOK}
+		cw := &compressWriter{ResponseWriter: rec, minSize: 1024}
+		ew := &etagWriter{ResponseWriter: cw, buf: &bytes.Buffer{}}
+
+		// Hijack through the outermost wrapper.
+		conn, _, err := ew.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+
+		// All wrappers should have hijacked=true.
+		if !ew.hijacked {
+			t.Error("etagWriter.hijacked should be true")
+		}
+		if !cw.hijacked {
+			t.Error("compressWriter.hijacked should be true")
+		}
+		if !rec.hijacked {
+			t.Error("responseRecorder.hijacked should be true")
+		}
+
+		// Deferred cleanup should be no-ops.
+		ew.finish()
+		cw.Close()
+		rec.WriteHeader(StatusOK)
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	resp, err := nethttp.Get(srv.URL)
+	if err == nil {
+		resp.Body.Close()
+	}
+
+	<-done
 }
 
 // Ensure unused imports are consumed.

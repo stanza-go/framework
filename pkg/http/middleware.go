@@ -1,6 +1,10 @@
 package http
 
 import (
+	"bufio"
+	"fmt"
+	"net"
+	nethttp "net/http"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -93,6 +97,7 @@ type responseRecorder struct {
 	status      int
 	written     int64
 	wroteHeader bool
+	hijacked    bool
 }
 
 // Unwrap returns the underlying ResponseWriter. This allows middleware
@@ -107,7 +112,7 @@ func (rec *responseRecorder) Unwrap() ResponseWriter {
 // are silently ignored to prevent "superfluous WriteHeader" warnings
 // from net/http.
 func (rec *responseRecorder) WriteHeader(code int) {
-	if rec.wroteHeader {
+	if rec.wroteHeader || rec.hijacked {
 		return
 	}
 	rec.status = code
@@ -115,10 +120,25 @@ func (rec *responseRecorder) WriteHeader(code int) {
 	rec.ResponseWriter.WriteHeader(code)
 }
 
+// Hijack implements net/http.Hijacker. It marks the recorder as hijacked
+// so that subsequent WriteHeader and Write calls are no-ops, then
+// delegates to the underlying writer's Hijack.
+func (rec *responseRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rec.ResponseWriter.(nethttp.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("http: underlying ResponseWriter does not implement Hijacker")
+	}
+	rec.hijacked = true
+	return hj.Hijack()
+}
+
 // Write captures the number of bytes written and delegates to the
 // wrapped ResponseWriter. If WriteHeader has not been called, it
 // implicitly sets the status to 200.
 func (rec *responseRecorder) Write(b []byte) (int, error) {
+	if rec.hijacked {
+		return 0, fmt.Errorf("http: write on hijacked connection")
+	}
 	if !rec.wroteHeader {
 		rec.WriteHeader(StatusOK)
 	}
