@@ -30,13 +30,13 @@ func WriteJSON(w ResponseWriter, status int, v any) {
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(StatusInternalServerError)
-		w.Write([]byte("{\"error\":\"failed to encode response\"}\n"))
+		_, _ = w.Write([]byte("{\"error\":\"failed to encode response\"}\n"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	w.Write(data)
-	w.Write([]byte("\n"))
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n"))
 }
 
 // WriteError writes a JSON error response with the given HTTP status

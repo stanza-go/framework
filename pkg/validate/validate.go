@@ -89,13 +89,13 @@ func (v *Validator) WriteError(w http.ResponseWriter) {
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("{\"error\":\"failed to encode validation errors\"}\n"))
+		_, _ = w.Write([]byte("{\"error\":\"failed to encode validation errors\"}\n"))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusUnprocessableEntity)
-	w.Write(data)
-	w.Write([]byte("\n"))
+	_, _ = w.Write(data)
+	_, _ = w.Write([]byte("\n"))
 }
 
 // --- Validator functions ---
