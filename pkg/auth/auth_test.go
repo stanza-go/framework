@@ -802,6 +802,120 @@ func TestRequireAuthOrAPIKey_FallbackToAPIKey(t *testing.T) {
 	}
 }
 
+func TestRequireAuthOrAPIKey_ExpiredJWT_FallbackToAPIKey(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey, WithAccessTokenTTL(0)) // TTL=0 means tokens expire immediately
+
+	// Issue a token that will be expired by the time we use it.
+	token, err := CreateJWT(testKey, Claims{
+		UID:       "user-1",
+		Scopes:    []string{"admin"},
+		IssuedAt:  time.Now().Add(-10 * time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(-5 * time.Minute).Unix(),
+	})
+	if err != nil {
+		t.Fatalf("create expired JWT: %v", err)
+	}
+
+	var gotClaims Claims
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotClaims, _ = ClaimsFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookie, Value: token})
+	req.Header.Set("Authorization", "Bearer stza_testkey123")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 (should fall back to API key)", rec.Code)
+	}
+	if gotClaims.UID != "apikey:42" {
+		t.Errorf("uid = %q, want apikey:42 (should use API key after expired JWT)", gotClaims.UID)
+	}
+}
+
+func TestRequireAuthOrAPIKey_InvalidJWT_InvalidAPIKey(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookie, Value: "invalid.jwt.token"})
+	req.Header.Set("Authorization", "Bearer stza_wrongkey")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+
+	var body map[string]string
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "invalid api key" {
+		t.Errorf("error = %q, want 'invalid api key'", body["error"])
+	}
+}
+
+func TestRequireAuthOrAPIKey_InvalidJWT_NoAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	// Expired JWT in cookie, no Authorization header.
+	token, _ := CreateJWT(testKey, Claims{
+		UID:       "user-1",
+		Scopes:    []string{"admin"},
+		IssuedAt:  time.Now().Add(-10 * time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(-5 * time.Minute).Unix(),
+	})
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookie, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+
+	var body map[string]string
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "authentication required" {
+		t.Errorf("error = %q, want 'authentication required'", body["error"])
+	}
+}
+
+func TestRequireAuthOrAPIKey_MalformedAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+
+	handler := a.RequireAuthOrAPIKey(validKeyValidator)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/api/v1/test", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz") // Not Bearer
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+}
+
 func TestRequireAuthOrAPIKey_BothFail(t *testing.T) {
 	t.Parallel()
 
@@ -877,5 +991,192 @@ func TestClaimsFromContext_Present(t *testing.T) {
 	}
 	if claims.UID != "user-1" {
 		t.Errorf("uid = %q, want user-1", claims.UID)
+	}
+}
+
+// --- Claims edge cases ---
+
+func TestClaimsValid_Boundary(t *testing.T) {
+	t.Parallel()
+
+	// Token that expires exactly now should be invalid (now < exp is false when equal).
+	c := Claims{ExpiresAt: time.Now().Unix()}
+	if c.Valid() {
+		t.Error("token expiring at exactly now should be invalid")
+	}
+}
+
+func TestClaimsHasScope_Empty(t *testing.T) {
+	t.Parallel()
+
+	c := Claims{Scopes: nil}
+	if c.HasScope("admin") {
+		t.Error("nil scopes should not contain any scope")
+	}
+
+	c = Claims{Scopes: []string{}}
+	if c.HasScope("admin") {
+		t.Error("empty scopes should not contain any scope")
+	}
+}
+
+func TestClaimsHasScope_Multiple(t *testing.T) {
+	t.Parallel()
+
+	c := Claims{Scopes: []string{"admin:read", "admin:write", "user:read"}}
+	if !c.HasScope("admin:write") {
+		t.Error("should find admin:write")
+	}
+	if !c.HasScope("user:read") {
+		t.Error("should find user:read")
+	}
+	if c.HasScope("admin:delete") {
+		t.Error("should not find admin:delete")
+	}
+}
+
+// --- Auth options ---
+
+func TestAuthWithCookiePath(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey, WithCookiePath("/api/user"))
+	if a.cookiePath != "/api/user" {
+		t.Errorf("cookiePath = %q, want /api/user", a.cookiePath)
+	}
+	if a.authCookiePath != "/api/user/auth" {
+		t.Errorf("authCookiePath = %q, want /api/user/auth", a.authCookiePath)
+	}
+}
+
+func TestAuthWithSecureCookies(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey, WithSecureCookies(false))
+	if a.secureCookies {
+		t.Error("secureCookies should be false")
+	}
+}
+
+func TestAuthTTLAccessors(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey,
+		WithAccessTokenTTL(10*time.Minute),
+		WithRefreshTokenTTL(48*time.Hour),
+	)
+	if a.AccessTokenTTL() != 10*time.Minute {
+		t.Errorf("AccessTokenTTL = %v, want 10m", a.AccessTokenTTL())
+	}
+	if a.RefreshTokenTTL() != 48*time.Hour {
+		t.Errorf("RefreshTokenTTL = %v, want 48h", a.RefreshTokenTTL())
+	}
+}
+
+// --- RequireAuth edge cases ---
+
+func TestRequireAuth_ExpiredTokenMessage(t *testing.T) {
+	t.Parallel()
+
+	a := New(testKey)
+	token, _ := CreateJWT(testKey, Claims{
+		UID:       "user-1",
+		Scopes:    []string{"admin"},
+		IssuedAt:  time.Now().Add(-10 * time.Minute).Unix(),
+		ExpiresAt: time.Now().Add(-5 * time.Minute).Unix(),
+	})
+
+	handler := a.RequireAuth()(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.AddCookie(&http.Cookie{Name: AccessTokenCookie, Value: token})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", rec.Code)
+	}
+
+	var body map[string]string
+	json.NewDecoder(rec.Body).Decode(&body)
+	if body["error"] != "token expired" {
+		t.Errorf("error = %q, want 'token expired'", body["error"])
+	}
+}
+
+func TestRequireScope_NoClaimsInContext(t *testing.T) {
+	t.Parallel()
+
+	handler := RequireScope("admin")(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	}))
+
+	req := httptest.NewRequest("GET", "/test", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401 (no claims in context)", rec.Code)
+	}
+}
+
+// --- Token helpers ---
+
+func TestHashTokenDeterministic(t *testing.T) {
+	t.Parallel()
+
+	h1 := HashToken("test-token")
+	h2 := HashToken("test-token")
+	if h1 != h2 {
+		t.Error("HashToken should be deterministic")
+	}
+
+	// SHA-256 hex output is 64 characters.
+	if len(h1) != 64 {
+		t.Errorf("hash length = %d, want 64", len(h1))
+	}
+
+	// Different tokens produce different hashes.
+	h3 := HashToken("different-token")
+	if h1 == h3 {
+		t.Error("different tokens should produce different hashes")
+	}
+}
+
+func TestGenerateRefreshTokenUniqueness(t *testing.T) {
+	t.Parallel()
+
+	t1, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	t2, err := GenerateRefreshToken()
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+
+	if t1 == t2 {
+		t.Error("two generated tokens should be different")
+	}
+	// 32 bytes hex = 64 chars.
+	if len(t1) != 64 {
+		t.Errorf("token length = %d, want 64", len(t1))
+	}
+}
+
+func TestWithClaimsForTest(t *testing.T) {
+	t.Parallel()
+
+	claims := Claims{UID: "test-user", Scopes: []string{"read"}}
+	ctx := WithClaimsForTest(context.Background(), claims)
+
+	got, ok := ClaimsFromContext(ctx)
+	if !ok {
+		t.Fatal("claims not found")
+	}
+	if got.UID != "test-user" {
+		t.Errorf("uid = %q, want test-user", got.UID)
 	}
 }

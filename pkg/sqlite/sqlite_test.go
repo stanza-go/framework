@@ -936,6 +936,244 @@ func TestRowsCloseAfterPartialIteration(t *testing.T) {
 	}
 }
 
+func TestQueryNotOpen(t *testing.T) {
+	db := New(":memory:")
+	_, err := db.Query("SELECT 1")
+	if err == nil {
+		t.Fatal("expected error on query before open")
+	}
+}
+
+func TestRowsColumnsCaching(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE colcache (a INTEGER, b TEXT, c REAL)")
+	db.Exec("INSERT INTO colcache VALUES (1, 'x', 1.5)")
+
+	rows, err := db.Query("SELECT a, b, c FROM colcache")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+
+	cols1 := rows.Columns()
+	cols2 := rows.Columns()
+
+	// Should return the same cached slice.
+	if &cols1[0] != &cols2[0] {
+		t.Error("Columns() should return the same cached slice on second call")
+	}
+}
+
+func TestRowsNextAfterClose(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE nac (id INTEGER)")
+	db.Exec("INSERT INTO nac VALUES (1)")
+
+	rows, err := db.Query("SELECT id FROM nac")
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	rows.Close()
+
+	if rows.Next() {
+		t.Error("Next() should return false after Close")
+	}
+}
+
+func TestScanBoolFalse(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE boolfalse (val INTEGER)")
+	db.Exec("INSERT INTO boolfalse VALUES (?)", false)
+
+	var val bool
+	if err := db.QueryRow("SELECT val FROM boolfalse").Scan(&val); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if val {
+		t.Fatal("expected false")
+	}
+}
+
+func TestScanIntFromNull(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE intnull (val INTEGER)")
+	db.Exec("INSERT INTO intnull VALUES (NULL)")
+
+	// Scanning NULL into *int gives 0 (SQLite returns 0 for NULL int columns).
+	var val int
+	if err := db.QueryRow("SELECT val FROM intnull").Scan(&val); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if val != 0 {
+		t.Fatalf("expected 0, got %d", val)
+	}
+}
+
+func TestScanStringFromNull(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE strnull (val TEXT)")
+	db.Exec("INSERT INTO strnull VALUES (NULL)")
+
+	var val string
+	if err := db.QueryRow("SELECT val FROM strnull").Scan(&val); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if val != "" {
+		t.Fatalf("expected empty string, got %q", val)
+	}
+}
+
+func TestScanBytesFromNull(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE bytesnull (val BLOB)")
+	db.Exec("INSERT INTO bytesnull VALUES (NULL)")
+
+	var val []byte
+	if err := db.QueryRow("SELECT val FROM bytesnull").Scan(&val); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if val != nil {
+		t.Fatalf("expected nil, got %v", val)
+	}
+}
+
+func TestExecManyEmpty(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE eme (val TEXT)")
+
+	err := db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERT INTO eme VALUES (?)", nil)
+	})
+	if err != nil {
+		t.Fatalf("ExecMany with nil argSets should succeed: %v", err)
+	}
+
+	err = db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERT INTO eme VALUES (?)", [][]any{})
+	})
+	if err != nil {
+		t.Fatalf("ExecMany with empty argSets should succeed: %v", err)
+	}
+
+	var count int
+	db.QueryRow("SELECT count(*) FROM eme").Scan(&count)
+	if count != 0 {
+		t.Fatalf("expected 0 rows, got %d", count)
+	}
+}
+
+func TestExecManyExecError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE eme2 (id INTEGER PRIMARY KEY, val TEXT NOT NULL)")
+	db.Exec("INSERT INTO eme2 (val) VALUES ('existing')")
+
+	// Second item violates NOT NULL — should fail mid-batch.
+	err := db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERT INTO eme2 (val) VALUES (?)", [][]any{
+			{"a"},
+			{nil}, // NOT NULL violation
+		})
+	})
+	if err == nil {
+		t.Fatal("expected error on ExecMany with NOT NULL violation")
+	}
+}
+
+func TestInTxWhenDBNotOpen(t *testing.T) {
+	db := New(":memory:")
+	err := db.InTx(func(tx *Tx) error {
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error on InTx before open")
+	}
+}
+
+func TestBindEmptyString(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE estr (val TEXT)")
+
+	_, err := db.Exec("INSERT INTO estr VALUES (?)", "")
+	if err != nil {
+		t.Fatalf("insert empty string: %v", err)
+	}
+
+	var val string
+	db.QueryRow("SELECT val FROM estr").Scan(&val)
+	if val != "" {
+		t.Fatalf("expected empty string, got %q", val)
+	}
+}
+
+func TestBindBoolFalse(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE bfalse (val INTEGER)")
+
+	_, err := db.Exec("INSERT INTO bfalse VALUES (?)", false)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var val int
+	db.QueryRow("SELECT val FROM bfalse").Scan(&val)
+	if val != 0 {
+		t.Fatalf("expected 0, got %d", val)
+	}
+}
+
+func TestBindInt(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE bint (val INTEGER)")
+
+	_, err := db.Exec("INSERT INTO bint VALUES (?)", 42)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var val int
+	db.QueryRow("SELECT val FROM bint").Scan(&val)
+	if val != 42 {
+		t.Fatalf("expected 42, got %d", val)
+	}
+}
+
+func TestTransactionQueryRowError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE txqre (id INTEGER)")
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// QueryRow with syntax error should produce a Row with error.
+	row := tx.QueryRow("SELECTZ bad")
+	var dummy int
+	if err := row.Scan(&dummy); err == nil {
+		t.Fatal("expected error from QueryRow with bad SQL")
+	}
+
+	tx.Rollback()
+}
+
+func TestSpecialCharactersInSQL(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE special (val TEXT)")
+
+	// Note: null bytes truncate in SQLite C strings, so we avoid \x00.
+	special := "newline\nfoo\tbar'quote\"double\\backslash"
+	_, err := db.Exec("INSERT INTO special VALUES (?)", special)
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	var val string
+	db.QueryRow("SELECT val FROM special").Scan(&val)
+	if val != special {
+		t.Fatalf("roundtrip mismatch: got %q", val)
+	}
+}
+
 func TestFilePermissions(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "perms.db")

@@ -861,6 +861,326 @@ func TestCancelNonPendingJob(t *testing.T) {
 	}
 }
 
+func TestOptionsValidation(t *testing.T) {
+	db := testDB(t)
+
+	// Zero/negative workers should keep default.
+	q := New(db, WithWorkers(0))
+	if q.workers != 1 {
+		t.Errorf("WithWorkers(0): workers = %d, want 1", q.workers)
+	}
+	q = New(db, WithWorkers(-1))
+	if q.workers != 1 {
+		t.Errorf("WithWorkers(-1): workers = %d, want 1", q.workers)
+	}
+
+	// Zero/negative maxAttempts should keep default.
+	q = New(db, WithMaxAttempts(0))
+	if q.maxAttempts != 3 {
+		t.Errorf("WithMaxAttempts(0): maxAttempts = %d, want 3", q.maxAttempts)
+	}
+	q = New(db, WithMaxAttempts(-1))
+	if q.maxAttempts != 3 {
+		t.Errorf("WithMaxAttempts(-1): maxAttempts = %d, want 3", q.maxAttempts)
+	}
+
+	// Negative pollInterval should keep default.
+	q = New(db, WithPollInterval(-1))
+	if q.pollInterval != time.Second {
+		t.Errorf("WithPollInterval(-1): pollInterval = %v, want 1s", q.pollInterval)
+	}
+
+	// Zero retryDelay is valid (retry immediately).
+	q = New(db, WithRetryDelay(0))
+	if q.retryDelay != 0 {
+		t.Errorf("WithRetryDelay(0): retryDelay = %v, want 0", q.retryDelay)
+	}
+
+	// Negative retryDelay should keep default.
+	q = New(db, WithRetryDelay(-1))
+	if q.retryDelay != 30*time.Second {
+		t.Errorf("WithRetryDelay(-1): retryDelay = %v, want 30s", q.retryDelay)
+	}
+}
+
+func TestEnqueueMaxAttemptsOptionValidation(t *testing.T) {
+	db := testDB(t)
+	q := New(db)
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	// MaxAttempts(0) should keep queue default.
+	id, err := q.Enqueue(context.Background(), "test", nil, MaxAttempts(0))
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	job, _ := q.Job(id)
+	if job.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts(0): max_attempts = %d, want 3", job.MaxAttempts)
+	}
+
+	// MaxAttempts(-1) should keep queue default.
+	id, err = q.Enqueue(context.Background(), "test", nil, MaxAttempts(-1))
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	job, _ = q.Job(id)
+	if job.MaxAttempts != 3 {
+		t.Errorf("MaxAttempts(-1): max_attempts = %d, want 3", job.MaxAttempts)
+	}
+}
+
+func TestJobsFilterCombined(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	q.Enqueue(ctx, "email", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "sms", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "email", nil, OnQueue("sms"))
+	q.Enqueue(ctx, "email", nil, OnQueue("emails"))
+
+	// Filter by both queue AND type.
+	jobs, err := q.Jobs(Filter{Queue: "emails", Type: "email"})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Errorf("filtered by queue+type = %d, want 2", len(jobs))
+	}
+
+	// Filter by queue+type+status.
+	jobs, err = q.Jobs(Filter{Queue: "emails", Type: "email", Status: StatusPending})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Errorf("filtered by queue+type+status = %d, want 2", len(jobs))
+	}
+
+	// Non-matching combined filter.
+	jobs, err = q.Jobs(Filter{Queue: "emails", Type: "email", Status: StatusCompleted})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("filtered with no matches = %d, want 0", len(jobs))
+	}
+}
+
+func TestJobsFilterOffset(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	for range 5 {
+		q.Enqueue(ctx, "test", nil)
+	}
+
+	// Limit 2, offset 3 → should return 2 jobs.
+	jobs, err := q.Jobs(Filter{Limit: 2, Offset: 3})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Errorf("jobs with limit=2 offset=3 = %d, want 2", len(jobs))
+	}
+
+	// Offset past end → should return 0.
+	jobs, err = q.Jobs(Filter{Limit: 10, Offset: 100})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 0 {
+		t.Errorf("jobs past end = %d, want 0", len(jobs))
+	}
+}
+
+func TestJobsDefaultLimit(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	// Default limit is 50 when Limit=0.
+	ctx := context.Background()
+	for range 3 {
+		q.Enqueue(ctx, "test", nil)
+	}
+
+	jobs, err := q.Jobs(Filter{Limit: 0})
+	if err != nil {
+		t.Fatalf("jobs: %v", err)
+	}
+	if len(jobs) != 3 {
+		t.Errorf("jobs = %d, want 3 (all fit within default limit)", len(jobs))
+	}
+}
+
+func TestRegisterOverwrite(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(50*time.Millisecond))
+
+	var executed atomic.Int32
+
+	q.Register("job", func(ctx context.Context, payload []byte) error {
+		executed.Store(1)
+		return nil
+	})
+	// Overwrite with new handler.
+	q.Register("job", func(ctx context.Context, payload []byte) error {
+		executed.Store(2)
+		return nil
+	})
+
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	q.Enqueue(context.Background(), "job", nil)
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout")
+		default:
+		}
+		if executed.Load() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if executed.Load() != 2 {
+		t.Errorf("handler = %d, want 2 (second registration should overwrite)", executed.Load())
+	}
+}
+
+func TestRetryFailedJob(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour), WithMaxAttempts(2), WithRetryDelay(0))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	id, _ := q.Enqueue(context.Background(), "test", nil)
+
+	// Manually set to failed status.
+	now := time.Now().UTC().Format(time.RFC3339)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, last_error = 'oops', updated_at = ? WHERE id = ?`,
+		StatusFailed, now, id)
+
+	// Retry should work for failed jobs.
+	if err := q.Retry(id); err != nil {
+		t.Fatalf("retry failed job: %v", err)
+	}
+
+	job, _ := q.Job(id)
+	if job.Status != StatusPending {
+		t.Errorf("status = %q, want %q", job.Status, StatusPending)
+	}
+}
+
+func TestJobCountCombinedFilter(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	q.Enqueue(ctx, "email", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "sms", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "email", nil, OnQueue("sms"))
+
+	n, err := q.JobCount(Filter{Queue: "emails", Type: "email"})
+	if err != nil {
+		t.Fatalf("job count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("count queue=emails type=email = %d, want 1", n)
+	}
+
+	n, err = q.JobCount(Filter{Queue: "emails", Type: "email", Status: StatusPending})
+	if err != nil {
+		t.Fatalf("job count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("count with status = %d, want 1", n)
+	}
+}
+
+func TestWithLogger(t *testing.T) {
+	db := testDB(t)
+	// Just verify the option is accepted without panic.
+	q := New(db, WithLogger(nil))
+	if q.logger != nil {
+		t.Error("logger should be nil")
+	}
+}
+
+func TestPurgeCancelled(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	id, _ := q.Enqueue(context.Background(), "test", nil)
+	q.Cancel(id)
+
+	// Set old timestamp.
+	oldTime := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+	db.Exec(`UPDATE _queue_jobs SET updated_at = ? WHERE id = ?`, oldTime, id)
+
+	deleted, err := q.Purge(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("deleted = %d, want 1", deleted)
+	}
+}
+
+func TestPurgeDoesNotDeleteRecent(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	id, _ := q.Enqueue(context.Background(), "test", nil)
+	now := time.Now().UTC().Format(time.RFC3339)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, updated_at = ? WHERE id = ?`,
+		StatusCompleted, now, id)
+
+	deleted, err := q.Purge(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0 (recent job should not be purged)", deleted)
+	}
+}
+
 func TestParseTime(t *testing.T) {
 	tests := []struct {
 		input string

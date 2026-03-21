@@ -461,6 +461,131 @@ func TestFileWriterCreatesDirectory(t *testing.T) {
 
 // --- All log levels test ---
 
+func TestLoggerBoolFalse(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelDebug))
+
+	l.Info("test", Bool("flag", false))
+
+	e := parseEntry(t, buf.Bytes())
+	if e["flag"] != false {
+		t.Errorf("flag = %v, want false", e["flag"])
+	}
+}
+
+func TestLoggerNilValue(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelDebug))
+
+	l.Info("test", Any("val", nil))
+
+	e := parseEntry(t, buf.Bytes())
+	if e["val"] != nil {
+		t.Errorf("val = %v, want nil", e["val"])
+	}
+}
+
+func TestLoggerFloat64(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelDebug))
+
+	l.Info("test", Float64("pi", 3.14159))
+
+	e := parseEntry(t, buf.Bytes())
+	if e["pi"] != 3.14159 {
+		t.Errorf("pi = %v, want 3.14159", e["pi"])
+	}
+}
+
+func TestInvalidUTF8Replacement(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelDebug))
+
+	// \xff is invalid UTF-8 — should be replaced with U+FFFD.
+	l.Info("test", String("data", "hello\xffworld"))
+
+	var e entry
+	if err := json.Unmarshal(buf.Bytes(), &e); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, buf.String())
+	}
+	data := e["data"].(string)
+	if !strings.Contains(data, "\ufffd") {
+		t.Errorf("expected replacement character, got %q", data)
+	}
+}
+
+func TestControlCharEscaping(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelDebug))
+
+	// Characters below 0x20 (except \n, \r, \t) should be \u00xx escaped.
+	l.Info("test", String("data", "bell\x07ack\x06"))
+
+	var e entry
+	if err := json.Unmarshal(buf.Bytes(), &e); err != nil {
+		t.Fatalf("invalid JSON: %v\nraw: %s", err, buf.String())
+	}
+	if e["data"] != "bell\x07ack\x06" {
+		t.Errorf("data = %q", e["data"])
+	}
+}
+
+func TestFileWriterCloseNilFile(t *testing.T) {
+	fw := &FileWriter{}
+	if err := fw.Close(); err != nil {
+		t.Errorf("close nil file: %v", err)
+	}
+}
+
+func TestFileWriterMultipleSameDayRotations(t *testing.T) {
+	dir := t.TempDir()
+	fw, err := NewFileWriter(dir, WithMaxSize(50), WithMaxFiles(10))
+	if err != nil {
+		t.Fatalf("NewFileWriter: %v", err)
+	}
+	defer fw.Close()
+
+	l := New(WithWriter(fw), WithLevel(LevelDebug))
+	// Write enough to trigger multiple rotations in the same day.
+	for i := 0; i < 30; i++ {
+		l.Info("trigger multiple same-day rotations with a longer message", Int("i", i))
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should have stanza.log + at least 2 rotated files (with .1.log, .2.log suffixes).
+	rotatedCount := 0
+	for _, e := range entries {
+		if e.Name() != "stanza.log" && strings.HasPrefix(e.Name(), "stanza-") {
+			rotatedCount++
+		}
+	}
+	if rotatedCount < 2 {
+		t.Errorf("expected at least 2 rotated files for same-day rotation, got %d", rotatedCount)
+	}
+}
+
+func TestLoggerChildInheritsLevel(t *testing.T) {
+	var buf bytes.Buffer
+	l := New(WithWriter(&buf), WithLevel(LevelWarn))
+
+	child := l.With(String("component", "test"))
+	child.Debug("should be filtered")
+	child.Info("should be filtered")
+	child.Warn("should appear")
+
+	entries := parseLines(t, buf.Bytes())
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if entries[0]["level"] != "warn" {
+		t.Errorf("level = %v, want warn", entries[0]["level"])
+	}
+}
+
 func TestAllLogLevels(t *testing.T) {
 	tests := []struct {
 		method string

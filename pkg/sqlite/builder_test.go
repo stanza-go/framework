@@ -523,6 +523,146 @@ func TestInsert_NilValue(t *testing.T) {
 	}
 }
 
+func TestSelect_OffsetOnly(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		Offset(10).
+		Build()
+
+	wantSQL := "SELECT id FROM users OFFSET ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{10}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_LimitZero(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		Limit(0).
+		Build()
+
+	wantSQL := "SELECT id FROM users LIMIT ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{0}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_MultipleJoins(t *testing.T) {
+	sql, _ := Select("u.id", "r.name", "d.name").
+		From("users u").
+		Join("roles r", "u.role_id = r.id").
+		LeftJoin("departments d", "u.dept_id = d.id").
+		Build()
+
+	wantSQL := "SELECT u.id, r.name, d.name FROM users u JOIN roles r ON u.role_id = r.id LEFT JOIN departments d ON u.dept_id = d.id"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+}
+
+func TestSelect_SingleColumn(t *testing.T) {
+	sql, args := Select("count(*)").
+		From("users").
+		Where("is_active = ?", 1).
+		Build()
+
+	wantSQL := "SELECT count(*) FROM users WHERE is_active = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestCount_NoWhere(t *testing.T) {
+	sql, args := Count("settings").Build()
+
+	wantSQL := "SELECT COUNT(*) FROM settings"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want empty", args)
+	}
+}
+
+func TestDelete_SingleWhere(t *testing.T) {
+	sql, args := Delete("sessions").
+		Where("expires_at < ?", "2026-01-01T00:00:00Z").
+		Build()
+
+	wantSQL := "DELETE FROM sessions WHERE expires_at < ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2026-01-01T00:00:00Z"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereWithMultipleArgs(t *testing.T) {
+	sql, args := Select("id").
+		From("jobs").
+		Where("status IN (?, ?)", "pending", "running").
+		Build()
+
+	wantSQL := "SELECT id FROM jobs WHERE status IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"pending", "running"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_SingleSet(t *testing.T) {
+	sql, args := Update("users").
+		Set("is_active", 0).
+		Where("id = ?", 1).
+		Build()
+
+	wantSQL := "UPDATE users SET is_active = ? WHERE id = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{0, 1}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_JoinWithWhere(t *testing.T) {
+	sql, args := Select("u.id", "r.name").
+		From("users u").
+		Join("roles r", "u.role_id = r.id").
+		Where("u.is_active = ?", 1).
+		Where("r.level > ?", 5).
+		OrderBy("u.id", "ASC").
+		Limit(10).
+		Build()
+
+	wantSQL := "SELECT u.id, r.name FROM users u JOIN roles r ON u.role_id = r.id WHERE u.is_active = ? AND r.level > ? ORDER BY u.id ASC LIMIT ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1, 5, 10}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
 func TestUpdate_SetArgOrder(t *testing.T) {
 	// Verify SET args come before WHERE args
 	sql, args := Update("users").
