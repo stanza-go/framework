@@ -443,6 +443,65 @@ func TestJobsFilter(t *testing.T) {
 	}
 }
 
+func TestJobCount(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	q.Enqueue(ctx, "email", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "email", nil, OnQueue("emails"))
+	q.Enqueue(ctx, "sms", nil, OnQueue("sms"))
+
+	// Count all.
+	n, err := q.JobCount(Filter{})
+	if err != nil {
+		t.Fatalf("job count all: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("count all = %d, want 3", n)
+	}
+
+	// Count by queue.
+	n, err = q.JobCount(Filter{Queue: "emails"})
+	if err != nil {
+		t.Fatalf("job count emails: %v", err)
+	}
+	if n != 2 {
+		t.Errorf("count emails = %d, want 2", n)
+	}
+
+	// Count by type.
+	n, err = q.JobCount(Filter{Type: "sms"})
+	if err != nil {
+		t.Fatalf("job count sms: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("count sms = %d, want 1", n)
+	}
+
+	// Count by status.
+	n, err = q.JobCount(Filter{Status: StatusPending})
+	if err != nil {
+		t.Fatalf("job count pending: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("count pending = %d, want 3", n)
+	}
+
+	// Count with no matches.
+	n, err = q.JobCount(Filter{Status: StatusCompleted})
+	if err != nil {
+		t.Fatalf("job count completed: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("count completed = %d, want 0", n)
+	}
+}
+
 func TestCancel(t *testing.T) {
 	db := testDB(t)
 	q := New(db, WithPollInterval(time.Hour))

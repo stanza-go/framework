@@ -386,6 +386,33 @@ func (q *Queue) Job(id int64) (Job, error) {
 	return j, nil
 }
 
+// JobCount returns the total number of jobs matching the given filter.
+// The Limit and Offset fields of the filter are ignored.
+func (q *Queue) JobCount(f Filter) (int, error) {
+	query := `SELECT COUNT(*) FROM _queue_jobs WHERE 1=1`
+	var args []any
+
+	if f.Queue != "" {
+		query += " AND queue = ?"
+		args = append(args, f.Queue)
+	}
+	if f.Type != "" {
+		query += " AND type = ?"
+		args = append(args, f.Type)
+	}
+	if f.Status != "" {
+		query += " AND status = ?"
+		args = append(args, f.Status)
+	}
+
+	var count int
+	err := q.db.QueryRow(query, args...).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("queue: job count: %w", err)
+	}
+	return count, nil
+}
+
 // Jobs returns jobs matching the given filter.
 func (q *Queue) Jobs(f Filter) ([]Job, error) {
 	query := `SELECT id, queue, type, payload, status, attempts, max_attempts,
