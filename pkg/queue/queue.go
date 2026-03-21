@@ -440,9 +440,11 @@ func (q *Queue) Jobs(f Filter) ([]Job, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	query += fmt.Sprintf(" LIMIT %d", limit)
+	query += " LIMIT ?"
+	args = append(args, limit)
 	if f.Offset > 0 {
-		query += fmt.Sprintf(" OFFSET %d", f.Offset)
+		query += " OFFSET ?"
+		args = append(args, f.Offset)
 	}
 
 	rows, err := q.db.Query(query, args...)

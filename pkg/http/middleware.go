@@ -90,12 +90,15 @@ type responseRecorder struct {
 }
 
 // WriteHeader captures the status code and delegates to the wrapped
-// ResponseWriter. Only the first call takes effect.
+// ResponseWriter. Only the first call is forwarded; subsequent calls
+// are silently ignored to prevent "superfluous WriteHeader" warnings
+// from net/http.
 func (rec *responseRecorder) WriteHeader(code int) {
-	if !rec.wroteHeader {
-		rec.status = code
-		rec.wroteHeader = true
+	if rec.wroteHeader {
+		return
 	}
+	rec.status = code
+	rec.wroteHeader = true
 	rec.ResponseWriter.WriteHeader(code)
 }
 

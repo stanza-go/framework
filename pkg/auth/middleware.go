@@ -91,12 +91,12 @@ func RequireScope(scope string) func(nethttp.Handler) nethttp.Handler {
 func writeUnauthorized(w nethttp.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(nethttp.StatusUnauthorized)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
 
 // writeForbidden writes a 403 JSON error response.
 func writeForbidden(w nethttp.ResponseWriter, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(nethttp.StatusForbidden)
-	json.NewEncoder(w).Encode(map[string]string{"error": message})
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": message})
 }
