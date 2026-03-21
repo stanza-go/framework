@@ -2108,3 +2108,200 @@ func TestRateLimitOnGroup(t *testing.T) {
 		t.Fatalf("free: status = %d, want %d", w.Code, StatusOK)
 	}
 }
+
+// === RequestID Tests ===
+
+func TestRequestIDGeneratesUUID(t *testing.T) {
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, StatusOK)
+	}
+
+	id := w.Header().Get("X-Request-ID")
+	if id == "" {
+		t.Fatal("X-Request-ID header is empty")
+	}
+	// UUID v4 format: 8-4-4-4-12 hex chars = 36 total.
+	if len(id) != 36 {
+		t.Errorf("X-Request-ID length = %d, want 36", len(id))
+	}
+	if id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+		t.Errorf("X-Request-ID = %q, not valid UUID format", id)
+	}
+}
+
+func TestRequestIDReusesIncoming(t *testing.T) {
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Request-ID", "my-trace-id-123")
+	r.ServeHTTP(w, req)
+
+	got := w.Header().Get("X-Request-ID")
+	if got != "my-trace-id-123" {
+		t.Errorf("X-Request-ID = %q, want %q", got, "my-trace-id-123")
+	}
+}
+
+func TestRequestIDUnique(t *testing.T) {
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	ids := make(map[string]bool)
+	for range 100 {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		r.ServeHTTP(w, req)
+
+		id := w.Header().Get("X-Request-ID")
+		if ids[id] {
+			t.Fatalf("duplicate request ID: %s", id)
+		}
+		ids[id] = true
+	}
+}
+
+func TestRequestIDContext(t *testing.T) {
+	var captured string
+
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		captured = GetRequestID(req)
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Request-ID", "ctx-test-456")
+	r.ServeHTTP(w, req)
+
+	if captured != "ctx-test-456" {
+		t.Errorf("GetRequestID() = %q, want %q", captured, "ctx-test-456")
+	}
+}
+
+func TestGetRequestIDWithoutMiddleware(t *testing.T) {
+	var captured string
+
+	r := NewRouter()
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		captured = GetRequestID(req)
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if captured != "" {
+		t.Errorf("GetRequestID() = %q, want empty", captured)
+	}
+}
+
+func TestRequestIDCustomHeader(t *testing.T) {
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{Header: "X-Trace-ID"}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Trace-ID", "custom-trace")
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Trace-ID"); got != "custom-trace" {
+		t.Errorf("X-Trace-ID = %q, want %q", got, "custom-trace")
+	}
+	// Default header should not be set.
+	if got := w.Header().Get("X-Request-ID"); got != "" {
+		t.Errorf("X-Request-ID = %q, want empty", got)
+	}
+}
+
+func TestRequestIDCustomGenerator(t *testing.T) {
+	counter := 0
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{
+		Generator: func() string {
+			counter++
+			return "req-" + strconv.Itoa(counter)
+		},
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	for i := 1; i <= 3; i++ {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/test", nil)
+		r.ServeHTTP(w, req)
+
+		want := "req-" + strconv.Itoa(i)
+		if got := w.Header().Get("X-Request-ID"); got != want {
+			t.Errorf("request %d: X-Request-ID = %q, want %q", i, got, want)
+		}
+	}
+}
+
+func TestRequestIDInRequestLogger(t *testing.T) {
+	var buf bytes.Buffer
+	logger := newTestLogger(&buf)
+
+	r := NewRouter()
+	r.Use(RequestID(RequestIDConfig{}))
+	r.Use(RequestLogger(logger))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	req.Header.Set("X-Request-ID", "log-trace-789")
+	r.ServeHTTP(w, req)
+
+	entry := parseLogEntry(t, buf.Bytes())
+	if entry["request_id"] != "log-trace-789" {
+		t.Errorf("log request_id = %v, want %q", entry["request_id"], "log-trace-789")
+	}
+}
+
+func TestGenerateUUIDFormat(t *testing.T) {
+	for range 50 {
+		id := generateUUID()
+		if len(id) != 36 {
+			t.Fatalf("length = %d, want 36", len(id))
+		}
+		// Check dashes.
+		if id[8] != '-' || id[13] != '-' || id[18] != '-' || id[23] != '-' {
+			t.Fatalf("invalid format: %s", id)
+		}
+		// Check version: character at index 14 should be '4'.
+		if id[14] != '4' {
+			t.Errorf("version char = %c, want '4'", id[14])
+		}
+		// Check variant: character at index 19 should be 8, 9, a, or b.
+		v := id[19]
+		if v != '8' && v != '9' && v != 'a' && v != 'b' {
+			t.Errorf("variant char = %c, want 8/9/a/b", v)
+		}
+	}
+}

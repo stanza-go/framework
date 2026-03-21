@@ -70,6 +70,12 @@ func RequestLogger(logger *log.Logger) Middleware {
 				log.String("remote", r.RemoteAddr),
 			}
 
+			// Include request ID if the RequestID middleware ran earlier
+			// in the chain.
+			if id := GetRequestID(r); id != "" {
+				fields = append(fields, log.String("request_id", id))
+			}
+
 			if rec.status >= 500 {
 				logger.Error("http request", fields...)
 			} else {
