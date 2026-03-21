@@ -114,6 +114,83 @@ func (rec *responseRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// SecureHeadersConfig configures the SecureHeaders middleware.
+type SecureHeadersConfig struct {
+	// FrameOptions controls the X-Frame-Options header. Common values
+	// are "DENY" (default) and "SAMEORIGIN". Set to empty string to
+	// use the default.
+	FrameOptions string
+
+	// ReferrerPolicy controls the Referrer-Policy header.
+	// Defaults to "strict-origin-when-cross-origin".
+	ReferrerPolicy string
+
+	// PermissionsPolicy controls the Permissions-Policy header.
+	// Defaults to "camera=(), microphone=(), geolocation=()".
+	PermissionsPolicy string
+
+	// HSTSMaxAge sets the Strict-Transport-Security max-age in seconds.
+	// Only set this when the app is served exclusively over HTTPS.
+	// Zero (default) omits the header entirely.
+	HSTSMaxAge int
+
+	// ContentSecurityPolicy sets the Content-Security-Policy header.
+	// Empty (default) omits the header — CSP is highly app-specific.
+	ContentSecurityPolicy string
+}
+
+// SecureHeaders returns middleware that sets common security headers on
+// all responses. With zero-value config, it applies safe defaults:
+//
+//   - X-Content-Type-Options: nosniff
+//   - X-Frame-Options: DENY
+//   - Referrer-Policy: strict-origin-when-cross-origin
+//   - X-XSS-Protection: 0
+//   - Permissions-Policy: camera=(), microphone=(), geolocation=()
+//
+// SecureHeaders should be added early in the middleware chain, before
+// CORS and Recovery:
+//
+//	r.Use(http.RequestLogger(logger))
+//	r.Use(http.SecureHeaders(http.SecureHeadersConfig{}))
+//	r.Use(http.CORS(corsConfig))
+//	r.Use(http.Recovery(onPanic))
+func SecureHeaders(cfg SecureHeadersConfig) Middleware {
+	if cfg.FrameOptions == "" {
+		cfg.FrameOptions = "DENY"
+	}
+	if cfg.ReferrerPolicy == "" {
+		cfg.ReferrerPolicy = "strict-origin-when-cross-origin"
+	}
+	if cfg.PermissionsPolicy == "" {
+		cfg.PermissionsPolicy = "camera=(), microphone=(), geolocation=()"
+	}
+
+	// Pre-compute HSTS value once.
+	var hstsValue string
+	if cfg.HSTSMaxAge > 0 {
+		hstsValue = "max-age=" + strconv.Itoa(cfg.HSTSMaxAge) + "; includeSubDomains"
+	}
+
+	return func(next Handler) Handler {
+		return HandlerFunc(func(w ResponseWriter, r *Request) {
+			h := w.Header()
+			h.Set("X-Content-Type-Options", "nosniff")
+			h.Set("X-Frame-Options", cfg.FrameOptions)
+			h.Set("Referrer-Policy", cfg.ReferrerPolicy)
+			h.Set("X-XSS-Protection", "0")
+			h.Set("Permissions-Policy", cfg.PermissionsPolicy)
+			if hstsValue != "" {
+				h.Set("Strict-Transport-Security", hstsValue)
+			}
+			if cfg.ContentSecurityPolicy != "" {
+				h.Set("Content-Security-Policy", cfg.ContentSecurityPolicy)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // CORSConfig configures the CORS middleware.
 type CORSConfig struct {
 	// AllowOrigins is the list of origins allowed to make cross-origin

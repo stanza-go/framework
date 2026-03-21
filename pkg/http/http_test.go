@@ -1544,3 +1544,164 @@ func TestParsePattern(t *testing.T) {
 		}
 	}
 }
+
+func TestSecureHeadersDefaults(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		WriteJSON(w, StatusOK, map[string]string{"ok": "true"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, StatusOK)
+	}
+
+	checks := map[string]string{
+		"X-Content-Type-Options": "nosniff",
+		"X-Frame-Options":       "DENY",
+		"Referrer-Policy":       "strict-origin-when-cross-origin",
+		"X-XSS-Protection":     "0",
+		"Permissions-Policy":    "camera=(), microphone=(), geolocation=()",
+	}
+	for header, want := range checks {
+		if got := w.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+
+	// HSTS and CSP should be absent by default.
+	if got := w.Header().Get("Strict-Transport-Security"); got != "" {
+		t.Errorf("Strict-Transport-Security = %q, want empty", got)
+	}
+	if got := w.Header().Get("Content-Security-Policy"); got != "" {
+		t.Errorf("Content-Security-Policy = %q, want empty", got)
+	}
+}
+
+func TestSecureHeadersCustomFrameOptions(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		FrameOptions: "SAMEORIGIN",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("X-Frame-Options"); got != "SAMEORIGIN" {
+		t.Errorf("X-Frame-Options = %q, want %q", got, "SAMEORIGIN")
+	}
+}
+
+func TestSecureHeadersHSTS(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		HSTSMaxAge: 63072000,
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	want := "max-age=63072000; includeSubDomains"
+	if got := w.Header().Get("Strict-Transport-Security"); got != want {
+		t.Errorf("Strict-Transport-Security = %q, want %q", got, want)
+	}
+}
+
+func TestSecureHeadersCSP(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		ContentSecurityPolicy: "default-src 'self'",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Content-Security-Policy"); got != "default-src 'self'" {
+		t.Errorf("Content-Security-Policy = %q, want %q", got, "default-src 'self'")
+	}
+}
+
+func TestSecureHeadersCustomReferrerPolicy(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		ReferrerPolicy: "no-referrer",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Referrer-Policy"); got != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want %q", got, "no-referrer")
+	}
+}
+
+func TestSecureHeadersCustomPermissionsPolicy(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		PermissionsPolicy: "camera=(), microphone=()",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("Permissions-Policy"); got != "camera=(), microphone=()" {
+		t.Errorf("Permissions-Policy = %q, want %q", got, "camera=(), microphone=()")
+	}
+}
+
+func TestSecureHeadersFullConfig(t *testing.T) {
+	r := NewRouter()
+	r.Use(SecureHeaders(SecureHeadersConfig{
+		FrameOptions:          "SAMEORIGIN",
+		ReferrerPolicy:        "no-referrer",
+		PermissionsPolicy:     "camera=(self)",
+		HSTSMaxAge:            31536000,
+		ContentSecurityPolicy: "default-src 'self'; script-src 'self'",
+	}))
+	r.HandleFunc("GET /test", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("ok"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/test", nil)
+	r.ServeHTTP(w, req)
+
+	checks := map[string]string{
+		"X-Content-Type-Options":    "nosniff",
+		"X-Frame-Options":          "SAMEORIGIN",
+		"Referrer-Policy":          "no-referrer",
+		"X-XSS-Protection":        "0",
+		"Permissions-Policy":       "camera=(self)",
+		"Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+		"Content-Security-Policy":  "default-src 'self'; script-src 'self'",
+	}
+	for header, want := range checks {
+		if got := w.Header().Get(header); got != want {
+			t.Errorf("%s = %q, want %q", header, got, want)
+		}
+	}
+}
