@@ -10,6 +10,7 @@ const (
 	StatusOK                  = 200
 	StatusCreated             = 201
 	StatusNoContent           = 204
+	StatusNotModified         = 304
 	StatusBadRequest          = 400
 	StatusUnauthorized        = 401
 	StatusForbidden           = 403

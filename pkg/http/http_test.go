@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	nethttp "net/http"
 	"net/http/httptest"
@@ -2648,5 +2649,346 @@ func TestCompressAcceptEncodingVariants(t *testing.T) {
 				t.Errorf("compressed = %v, want %v for Accept-Encoding %q", got, tt.want, tt.encoding)
 			}
 		})
+	}
+}
+
+// === ETag Middleware Tests ===
+
+func TestETagSetsHeader(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"hello":"world"}`))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, StatusOK)
+	}
+	etag := w.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header, got empty")
+	}
+	if !strings.HasPrefix(etag, `"`) || !strings.HasSuffix(etag, `"`) {
+		t.Errorf("ETag %q should be quoted", etag)
+	}
+	if got := w.Body.String(); got != `{"hello":"world"}` {
+		t.Errorf("body = %q, want %q", got, `{"hello":"world"}`)
+	}
+}
+
+func TestETag304WhenMatches(t *testing.T) {
+	handler := HandlerFunc(func(w ResponseWriter, req *Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"hello":"world"}`))
+	})
+
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.Handle("GET /data", handler)
+
+	// First request to get the ETag.
+	w1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w1, req1)
+	etag := w1.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header on first request")
+	}
+
+	// Second request with If-None-Match.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/data", nil)
+	req2.Header.Set("If-None-Match", etag)
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != StatusNotModified {
+		t.Fatalf("status = %d, want %d", w2.Code, StatusNotModified)
+	}
+	if w2.Body.Len() != 0 {
+		t.Errorf("304 response should have empty body, got %d bytes", w2.Body.Len())
+	}
+	// ETag header should still be set on 304.
+	if got := w2.Header().Get("ETag"); got != etag {
+		t.Errorf("ETag on 304 = %q, want %q", got, etag)
+	}
+}
+
+func TestETag200WhenMismatch(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("hello"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("If-None-Match", `"deadbeef"`)
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, StatusOK)
+	}
+	if got := w.Body.String(); got != "hello" {
+		t.Errorf("body = %q, want %q", got, "hello")
+	}
+}
+
+func TestETagSkipsPOST(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("POST /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("created"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/data", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("ETag"); got != "" {
+		t.Errorf("POST should not get ETag, got %q", got)
+	}
+}
+
+func TestETagSkipsNon2xx(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /err", func(w ResponseWriter, req *Request) {
+		w.WriteHeader(StatusNotFound)
+		w.Write([]byte("not found"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/err", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusNotFound {
+		t.Fatalf("status = %d, want %d", w.Code, StatusNotFound)
+	}
+	if got := w.Header().Get("ETag"); got != "" {
+		t.Errorf("non-2xx should not get ETag, got %q", got)
+	}
+	if got := w.Body.String(); got != "not found" {
+		t.Errorf("body = %q, want %q", got, "not found")
+	}
+}
+
+func TestETagSkipsEmptyBody(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /empty", func(w ResponseWriter, req *Request) {
+		w.WriteHeader(StatusNoContent)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/empty", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("ETag"); got != "" {
+		t.Errorf("empty body should not get ETag, got %q", got)
+	}
+}
+
+func TestETagWeakETag(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{Weak: true}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("content"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w, req)
+
+	etag := w.Header().Get("ETag")
+	if !strings.HasPrefix(etag, `W/"`) {
+		t.Errorf("weak ETag %q should start with W/", etag)
+	}
+}
+
+func TestETagWeakComparison(t *testing.T) {
+	// Per RFC 7232, If-None-Match uses weak comparison:
+	// W/"x" matches "x" and vice versa.
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{})) // Strong ETags.
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("content"))
+	})
+
+	// Get the strong ETag.
+	w1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w1, req1)
+	etag := w1.Header().Get("ETag") // e.g., "abc123"
+
+	// Send If-None-Match with W/ prefix — should still match.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/data", nil)
+	req2.Header.Set("If-None-Match", "W/"+etag)
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != StatusNotModified {
+		t.Fatalf("weak comparison: status = %d, want %d", w2.Code, StatusNotModified)
+	}
+}
+
+func TestETagWildcard(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("content"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	req.Header.Set("If-None-Match", "*")
+	r.ServeHTTP(w, req)
+
+	if w.Code != StatusNotModified {
+		t.Fatalf("wildcard: status = %d, want %d", w.Code, StatusNotModified)
+	}
+}
+
+func TestETagMultipleValues(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("content"))
+	})
+
+	// Get the actual ETag.
+	w1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w1, req1)
+	etag := w1.Header().Get("ETag")
+
+	// Send If-None-Match with multiple values, one matching.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/data", nil)
+	req2.Header.Set("If-None-Match", `"deadbeef", `+etag+`, "cafebabe"`)
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != StatusNotModified {
+		t.Fatalf("multi-value match: status = %d, want %d", w2.Code, StatusNotModified)
+	}
+}
+
+func TestETagConsistentHash(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("deterministic content"))
+	})
+
+	// Same content produces same ETag.
+	var etags [3]string
+	for i := range etags {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", "/data", nil)
+		r.ServeHTTP(w, req)
+		etags[i] = w.Header().Get("ETag")
+	}
+
+	if etags[0] != etags[1] || etags[1] != etags[2] {
+		t.Errorf("ETags should be consistent: %v", etags)
+	}
+}
+
+func TestETagDifferentContent(t *testing.T) {
+	call := 0
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		call++
+		w.Write([]byte(fmt.Sprintf("content-%d", call)))
+	})
+
+	w1 := httptest.NewRecorder()
+	r.ServeHTTP(w1, httptest.NewRequest("GET", "/data", nil))
+	etag1 := w1.Header().Get("ETag")
+
+	w2 := httptest.NewRecorder()
+	r.ServeHTTP(w2, httptest.NewRequest("GET", "/data", nil))
+	etag2 := w2.Header().Get("ETag")
+
+	if etag1 == etag2 {
+		t.Errorf("different content should produce different ETags: %q", etag1)
+	}
+}
+
+func TestETagPreservesExistingETag(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Header().Set("ETag", `"custom-etag"`)
+		w.Write([]byte("content"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/data", nil)
+	r.ServeHTTP(w, req)
+
+	if got := w.Header().Get("ETag"); got != `"custom-etag"` {
+		t.Errorf("ETag = %q, want %q", got, `"custom-etag"`)
+	}
+}
+
+func TestETagHEADRequest(t *testing.T) {
+	r := NewRouter()
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		w.Write([]byte("content"))
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("HEAD", "/data", nil)
+	r.ServeHTTP(w, req)
+
+	// HEAD should still get an ETag header.
+	if got := w.Header().Get("ETag"); got == "" {
+		t.Error("HEAD request should get ETag header")
+	}
+}
+
+func TestETagWithCompress(t *testing.T) {
+	r := NewRouter()
+	r.Use(Compress(CompressConfig{}))
+	r.Use(ETag(ETagConfig{}))
+	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
+		body := strings.Repeat(`{"key":"value"},`, 100) // >1KB
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+
+	// First request: get ETag and compressed body.
+	w1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest("GET", "/data", nil)
+	req1.Header.Set("Accept-Encoding", "gzip")
+	r.ServeHTTP(w1, req1)
+
+	if w1.Code != StatusOK {
+		t.Fatalf("status = %d, want %d", w1.Code, StatusOK)
+	}
+	etag := w1.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("expected ETag header")
+	}
+	if got := w1.Header().Get("Content-Encoding"); got != "gzip" {
+		t.Fatalf("Content-Encoding = %q, want gzip", got)
+	}
+
+	// Second request with If-None-Match: should get 304.
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest("GET", "/data", nil)
+	req2.Header.Set("Accept-Encoding", "gzip")
+	req2.Header.Set("If-None-Match", etag)
+	r.ServeHTTP(w2, req2)
+
+	if w2.Code != StatusNotModified {
+		t.Fatalf("conditional with compress: status = %d, want %d", w2.Code, StatusNotModified)
 	}
 }
