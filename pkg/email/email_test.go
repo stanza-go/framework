@@ -291,6 +291,148 @@ func TestAPIErrorMessage(t *testing.T) {
 	}
 }
 
+func TestSendInvalidJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return invalid JSON — status 200 but body is not valid JSON.
+		_, _ = w.Write([]byte(`not json at all`))
+	}))
+	defer srv.Close()
+
+	c := New("re_test_key",
+		WithFrom("noreply@example.com"),
+		WithEndpoint(srv.URL),
+	)
+
+	_, err := c.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Test",
+		HTML:    "<p>hi</p>",
+	})
+	if err == nil {
+		t.Fatal("expected error for invalid JSON response")
+	}
+	// Should be a decode error, not an API error.
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		t.Fatal("should not be APIError — it was a 200 response")
+	}
+}
+
+func TestSendServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"message":"internal server error"}`))
+	}))
+	defer srv.Close()
+
+	c := New("re_test_key",
+		WithFrom("noreply@example.com"),
+		WithEndpoint(srv.URL),
+	)
+
+	_, err := c.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Test",
+		HTML:    "<p>hi</p>",
+	})
+	if err == nil {
+		t.Fatal("expected error for 500 response")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T: %v", err, err)
+	}
+	if apiErr.StatusCode != 500 {
+		t.Fatalf("expected status 500, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestSendRateLimited(t *testing.T) {
+	var callCount atomic.Int64
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		callCount.Add(1)
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"message":"rate limited"}`))
+	}))
+	defer srv.Close()
+
+	c := New("re_test_key",
+		WithFrom("noreply@example.com"),
+		WithEndpoint(srv.URL),
+	)
+
+	_, err := c.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Test",
+		HTML:    "<p>hi</p>",
+	})
+	if err == nil {
+		t.Fatal("expected error for 429 response")
+	}
+
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("expected *APIError, got %T", err)
+	}
+	if apiErr.StatusCode != 429 {
+		t.Fatalf("expected status 429, got %d", apiErr.StatusCode)
+	}
+}
+
+func TestSendTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+		_, _ = w.Write([]byte(`{"id":"msg_late"}`))
+	}))
+	defer srv.Close()
+
+	c := New("re_test_key",
+		WithFrom("noreply@example.com"),
+		WithEndpoint(srv.URL),
+		WithTimeout(50*time.Millisecond), // very short timeout
+	)
+
+	_, err := c.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Test",
+		HTML:    "<p>hi</p>",
+	})
+	if err == nil {
+		t.Fatal("expected error for timeout")
+	}
+}
+
+func TestSendEmptyResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		// Return empty body — valid JSON unmarshal to zero value.
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	c := New("re_test_key",
+		WithFrom("noreply@example.com"),
+		WithEndpoint(srv.URL),
+	)
+
+	result, err := c.Send(context.Background(), Message{
+		To:      []string{"user@example.com"},
+		Subject: "Test",
+		HTML:    "<p>hi</p>",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.ID != "" {
+		t.Fatalf("expected empty ID, got %s", result.ID)
+	}
+}
+
 func TestSendConcurrent(t *testing.T) {
 	var count atomic.Int64
 

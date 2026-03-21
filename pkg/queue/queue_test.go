@@ -3,10 +3,12 @@ package queue
 import (
 	"context"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/stanza-go/framework/pkg/log"
 	"github.com/stanza-go/framework/pkg/sqlite"
 )
 
@@ -1199,5 +1201,289 @@ func TestParseTime(t *testing.T) {
 		if !tt.zero && result.IsZero() {
 			t.Errorf("parseTime(%q) = zero, want non-zero", tt.input)
 		}
+	}
+}
+
+func TestStatsAllStatuses(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Create jobs in all statuses.
+	pendingID, _ := q.Enqueue(ctx, "a", nil)
+	runningID, _ := q.Enqueue(ctx, "b", nil)
+	completedID, _ := q.Enqueue(ctx, "c", nil)
+	failedID, _ := q.Enqueue(ctx, "d", nil)
+	deadID, _ := q.Enqueue(ctx, "e", nil)
+	cancelledID, _ := q.Enqueue(ctx, "f", nil)
+
+	// Keep one pending (pendingID is already pending).
+	_ = pendingID
+	db.Exec(`UPDATE _queue_jobs SET status = ?, started_at = ?, updated_at = ? WHERE id = ?`,
+		StatusRunning, now, now, runningID)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
+		StatusCompleted, now, now, completedID)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, last_error = 'err', updated_at = ? WHERE id = ?`,
+		StatusFailed, now, failedID)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, last_error = 'err', completed_at = ?, updated_at = ? WHERE id = ?`,
+		StatusDead, now, now, deadID)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, updated_at = ? WHERE id = ?`,
+		StatusCancelled, now, cancelledID)
+
+	stats, err := q.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Pending != 1 {
+		t.Errorf("pending = %d, want 1", stats.Pending)
+	}
+	if stats.Running != 1 {
+		t.Errorf("running = %d, want 1", stats.Running)
+	}
+	if stats.Completed != 1 {
+		t.Errorf("completed = %d, want 1", stats.Completed)
+	}
+	if stats.Failed != 1 {
+		t.Errorf("failed = %d, want 1", stats.Failed)
+	}
+	if stats.Dead != 1 {
+		t.Errorf("dead = %d, want 1", stats.Dead)
+	}
+	if stats.Cancelled != 1 {
+		t.Errorf("cancelled = %d, want 1", stats.Cancelled)
+	}
+}
+
+func TestWithLoggerNonNil(t *testing.T) {
+	db := testDB(t)
+	logger := log.New(log.WithWriter(io.Discard))
+	q := New(db,
+		WithLogger(logger),
+		WithPollInterval(50*time.Millisecond),
+	)
+
+	q.Register("logged", func(ctx context.Context, payload []byte) error {
+		return nil
+	})
+
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	// Enqueue and wait for processing — this exercises logInfo paths.
+	id, err := q.Enqueue(context.Background(), "logged", []byte(`{"x":1}`))
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for job completion")
+		default:
+		}
+		j, _ := q.Job(id)
+		if j.Status == StatusCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if err := q.Stop(context.Background()); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+func TestWithLoggerError(t *testing.T) {
+	db := testDB(t)
+	logger := log.New(log.WithWriter(io.Discard))
+	q := New(db,
+		WithLogger(logger),
+		WithPollInterval(50*time.Millisecond),
+		WithMaxAttempts(1),
+	)
+
+	q.Register("fail_logged", func(ctx context.Context, payload []byte) error {
+		return fmt.Errorf("job error for logging")
+	})
+
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	id, err := q.Enqueue(context.Background(), "fail_logged", nil)
+	if err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Wait for dead state — exercises logError paths.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout waiting for dead state")
+		default:
+		}
+		j, _ := q.Job(id)
+		if j.Status == StatusDead {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestStatsEmpty(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	stats, err := q.Stats()
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if stats.Pending != 0 || stats.Running != 0 || stats.Completed != 0 ||
+		stats.Failed != 0 || stats.Dead != 0 || stats.Cancelled != 0 {
+		t.Errorf("expected all zeros, got %+v", stats)
+	}
+}
+
+func TestPurgeNothingToDelete(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	// No jobs at all.
+	deleted, err := q.Purge(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0", deleted)
+	}
+}
+
+func TestPurgeDoesNotDeletePendingOrDead(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(time.Hour))
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	ctx := context.Background()
+	oldTime := time.Now().UTC().Add(-48 * time.Hour).Format(time.RFC3339)
+
+	// Create a pending job with old timestamp — should NOT be purged.
+	pendingID, _ := q.Enqueue(ctx, "test", nil)
+	db.Exec(`UPDATE _queue_jobs SET updated_at = ? WHERE id = ?`, oldTime, pendingID)
+
+	// Create a dead job with old timestamp — should NOT be purged (dead != completed/cancelled).
+	deadID, _ := q.Enqueue(ctx, "test", nil)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, updated_at = ? WHERE id = ?`,
+		StatusDead, oldTime, deadID)
+
+	// Create a failed job with old timestamp — should NOT be purged.
+	failedID, _ := q.Enqueue(ctx, "test", nil)
+	db.Exec(`UPDATE _queue_jobs SET status = ?, updated_at = ? WHERE id = ?`,
+		StatusFailed, oldTime, failedID)
+
+	deleted, err := q.Purge(24 * time.Hour)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if deleted != 0 {
+		t.Errorf("deleted = %d, want 0 (only completed/cancelled should be purged)", deleted)
+	}
+}
+
+func TestRecoverStuckNoStuckJobs(t *testing.T) {
+	db := testDB(t)
+
+	q1 := New(db)
+	if err := q1.Start(context.Background()); err != nil {
+		t.Fatalf("start q1: %v", err)
+	}
+	q1.Stop(context.Background())
+
+	// Enqueue a pending job (not stuck).
+	q1.Enqueue(context.Background(), "test", nil)
+
+	// New queue should start without issue — no stuck jobs to recover.
+	q2 := New(db, WithPollInterval(time.Hour))
+	if err := q2.Start(context.Background()); err != nil {
+		t.Fatalf("start q2: %v", err)
+	}
+	q2.Stop(context.Background())
+}
+
+func TestJobFieldsParsed(t *testing.T) {
+	db := testDB(t)
+	q := New(db, WithPollInterval(50*time.Millisecond))
+
+	q.Register("detail", func(ctx context.Context, payload []byte) error {
+		return nil
+	})
+
+	if err := q.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer q.Stop(context.Background())
+
+	id, _ := q.Enqueue(context.Background(), "detail", []byte(`{"key":"val"}`),
+		OnQueue("custom"))
+
+	// Wait for completion.
+	deadline := time.After(2 * time.Second)
+	for {
+		select {
+		case <-deadline:
+			t.Fatal("timeout")
+		default:
+		}
+		j, _ := q.Job(id)
+		if j.Status == StatusCompleted {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	job, err := q.Job(id)
+	if err != nil {
+		t.Fatalf("job: %v", err)
+	}
+	if job.Queue != "custom" {
+		t.Errorf("queue = %q, want %q", job.Queue, "custom")
+	}
+	if string(job.Payload) != `{"key":"val"}` {
+		t.Errorf("payload = %q", string(job.Payload))
+	}
+	if job.CreatedAt.IsZero() {
+		t.Error("created_at should be set")
+	}
+	if job.UpdatedAt.IsZero() {
+		t.Error("updated_at should be set")
+	}
+	if job.StartedAt.IsZero() {
+		t.Error("started_at should be set")
+	}
+	if job.CompletedAt.IsZero() {
+		t.Error("completed_at should be set")
+	}
+	if job.RunAt.IsZero() {
+		t.Error("run_at should be set")
 	}
 }

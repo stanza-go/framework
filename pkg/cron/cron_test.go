@@ -3,10 +3,13 @@ package cron
 import (
 	"context"
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stanza-go/framework/pkg/log"
 )
 
 // === Parse Tests ===
@@ -681,6 +684,80 @@ func TestOnComplete_Success(t *testing.T) {
 	}
 	if r.Started.IsZero() {
 		t.Error("started is zero")
+	}
+}
+
+func TestWithLogger(t *testing.T) {
+	logger := log.New(log.WithWriter(io.Discard))
+	s := NewScheduler(WithLogger(logger))
+
+	if err := s.Add("logged-job", "* * * * *", func(_ context.Context) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	// Trigger to exercise logInfo path.
+	if err := s.Trigger("logged-job"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		entries := s.Entries()
+		if entries[0].Running {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if !entries[0].LastRun.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for job")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWithLoggerError(t *testing.T) {
+	logger := log.New(log.WithWriter(io.Discard))
+	s := NewScheduler(WithLogger(logger))
+
+	if err := s.Add("fail-logged", "* * * * *", func(_ context.Context) error {
+		return errors.New("intentional failure for logging")
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	// Trigger to exercise logError path.
+	if err := s.Trigger("fail-logged"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		entries := s.Entries()
+		if entries[0].Running {
+			time.Sleep(10 * time.Millisecond)
+			continue
+		}
+		if !entries[0].LastRun.IsZero() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for job")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

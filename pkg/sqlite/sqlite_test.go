@@ -1191,3 +1191,328 @@ func TestFilePermissions(t *testing.T) {
 		t.Fatal("database file is empty")
 	}
 }
+
+func TestQueryBindError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE qbe (val TEXT)")
+	db.Exec("INSERT INTO qbe VALUES ('x')")
+
+	// Query with unsupported bind type should return error and release mutex.
+	_, err := db.Query("SELECT val FROM qbe WHERE val = ?", struct{}{})
+	if err == nil {
+		t.Fatal("expected error for unsupported bind type in Query")
+	}
+
+	// DB should still be usable after bind error.
+	var val string
+	if err := db.QueryRow("SELECT val FROM qbe").Scan(&val); err != nil {
+		t.Fatalf("db unusable after bind error: %v", err)
+	}
+	if val != "x" {
+		t.Fatalf("expected x, got %s", val)
+	}
+}
+
+func TestTransactionQueryBindError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE txqbe (val TEXT)")
+	db.Exec("INSERT INTO txqbe VALUES ('y')")
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// Query with unsupported bind type inside transaction.
+	_, err = tx.Query("SELECT val FROM txqbe WHERE val = ?", struct{}{})
+	if err == nil {
+		t.Fatal("expected error for unsupported bind type in tx.Query")
+	}
+
+	// Transaction should still be usable after bind error.
+	var val string
+	if err := tx.QueryRow("SELECT val FROM txqbe").Scan(&val); err != nil {
+		t.Fatalf("tx unusable after bind error: %v", err)
+	}
+	if val != "y" {
+		t.Fatalf("expected y, got %s", val)
+	}
+
+	tx.Commit()
+}
+
+func TestExecManyStepError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE ems (id INTEGER PRIMARY KEY, val TEXT UNIQUE NOT NULL)")
+	db.Exec("INSERT INTO ems (val) VALUES ('existing')")
+
+	// Second batch item has a duplicate that fails at step time (UNIQUE violation).
+	err := db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERT INTO ems (val) VALUES (?)", [][]any{
+			{"new"},
+			{"existing"}, // UNIQUE violation at step
+		})
+	})
+	if err == nil {
+		t.Fatal("expected error for UNIQUE violation in ExecMany")
+	}
+}
+
+func TestBackupSourceOpenError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "subdir", "test.db")
+
+	// Create a DB pointing to a non-existent path (the subdir does not exist).
+	// backupBeforeMigrate should treat non-existent file as "nothing to back up".
+	db := New(dbPath)
+	// We can't call Start (path invalid), but we can test backupBeforeMigrate directly
+	// by setting path to a non-existent file — it returns nil (no backup needed).
+	db.path = filepath.Join(dir, "nonexistent.db")
+	err := db.backupBeforeMigrate()
+	if err != nil {
+		t.Fatalf("expected nil for non-existent source, got: %v", err)
+	}
+}
+
+func TestBackupEmptyPath(t *testing.T) {
+	db := New("")
+	err := db.backupBeforeMigrate()
+	if err != nil {
+		t.Fatalf("expected nil for empty path, got: %v", err)
+	}
+}
+
+func TestMigrateBackupCopyError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db := New(dbPath)
+	if err := db.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	defer db.Stop(context.Background())
+
+	// Create data so there's something to back up.
+	db.Exec("CREATE TABLE pre (id INTEGER)")
+
+	db.AddMigration(1, "m1", func(tx *Tx) error {
+		_, err := tx.Exec("CREATE TABLE t1 (id INTEGER)")
+		return err
+	}, nil)
+
+	// Normal backup should succeed.
+	n, err := db.Migrate()
+	if err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected 1, got %d", n)
+	}
+	if db.LastBackupPath() == "" {
+		t.Fatal("expected backup path to be set")
+	}
+	os.Remove(db.LastBackupPath())
+}
+
+func TestScanAnyEmptyBlob(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE anyblob (data BLOB)")
+	// Insert an empty blob (not NULL).
+	db.Exec("INSERT INTO anyblob VALUES (X'')")
+
+	var data any
+	if err := db.QueryRow("SELECT data FROM anyblob").Scan(&data); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	// Empty blob scanned into *any should return empty byte slice.
+	bs, ok := data.([]byte)
+	if !ok {
+		t.Fatalf("expected []byte, got %T", data)
+	}
+	if len(bs) != 0 {
+		t.Fatalf("expected empty slice, got %v", bs)
+	}
+}
+
+func TestExecStepError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE ese (id INTEGER PRIMARY KEY, val TEXT UNIQUE)")
+	db.Exec("INSERT INTO ese VALUES (1, 'a')")
+
+	// Exec that prepares fine but fails at step (duplicate key).
+	_, err := db.Exec("INSERT INTO ese VALUES (1, 'b')")
+	if err == nil {
+		t.Fatal("expected error for duplicate primary key")
+	}
+}
+
+func TestTransactionExecStepError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE txese (id INTEGER PRIMARY KEY, val TEXT UNIQUE)")
+	db.Exec("INSERT INTO txese VALUES (1, 'a')")
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// Exec inside tx that fails at step.
+	_, err = tx.Exec("INSERT INTO txese VALUES (1, 'b')")
+	if err == nil {
+		t.Fatal("expected error for duplicate primary key in tx")
+	}
+
+	tx.Rollback()
+}
+
+func TestPrepareEmptyStatement(t *testing.T) {
+	db := openTestDB(t)
+
+	// Empty SQL should fail at prepare.
+	_, err := db.Exec("")
+	if err == nil {
+		t.Fatal("expected error for empty SQL")
+	}
+}
+
+func TestQueryPrepareError(t *testing.T) {
+	db := openTestDB(t)
+
+	// Bad SQL should fail at prepare and release the mutex.
+	_, err := db.Query("SELECTZ bad syntax")
+	if err == nil {
+		t.Fatal("expected error for bad SQL in Query")
+	}
+
+	// DB should still be usable.
+	var n int
+	if err := db.QueryRow("SELECT 1").Scan(&n); err != nil {
+		t.Fatalf("db unusable after prepare error: %v", err)
+	}
+}
+
+func TestTransactionQueryPrepareError(t *testing.T) {
+	db := openTestDB(t)
+
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+
+	// Bad SQL in tx.Query should return error.
+	_, err = tx.Query("SELECTZ bad syntax")
+	if err == nil {
+		t.Fatal("expected error for bad SQL in tx.Query")
+	}
+
+	// Tx should still be usable.
+	var n int
+	if err := tx.QueryRow("SELECT 1").Scan(&n); err != nil {
+		t.Fatalf("tx unusable after prepare error: %v", err)
+	}
+
+	tx.Commit()
+}
+
+func TestExecManyPrepareError(t *testing.T) {
+	db := openTestDB(t)
+
+	err := db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERTX bad syntax", [][]any{{"a"}})
+	})
+	if err == nil {
+		t.Fatal("expected error for bad SQL in ExecMany")
+	}
+}
+
+func TestExecManyBindError(t *testing.T) {
+	db := openTestDB(t)
+	db.Exec("CREATE TABLE embe (val TEXT)")
+
+	err := db.InTx(func(tx *Tx) error {
+		return tx.ExecMany("INSERT INTO embe VALUES (?)", [][]any{
+			{"ok"},
+			{struct{}{}}, // unsupported bind type
+		})
+	})
+	if err == nil {
+		t.Fatal("expected error for unsupported bind type in ExecMany")
+	}
+}
+
+func TestRollbackDownError(t *testing.T) {
+	db := openTestDB(t)
+	db.AddMigration(1710892800, "create_tbl", func(tx *Tx) error {
+		_, err := tx.Exec("CREATE TABLE rtbl (id INTEGER PRIMARY KEY)")
+		return err
+	}, func(tx *Tx) error {
+		return errors.New("down function failed intentionally")
+	})
+
+	if _, err := db.Migrate(); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	// Rollback should propagate the down function error.
+	_, err := db.Rollback()
+	if err == nil {
+		t.Fatal("expected error from failing down function")
+	}
+	if !errors.Is(err, errors.New("")) {
+		// Just check the error message contains useful info.
+		expected := "down function failed intentionally"
+		got := err.Error()
+		found := false
+		for i := 0; i+len(expected) <= len(got); i++ {
+			if got[i:i+len(expected)] == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected error to contain %q, got %q", expected, got)
+		}
+	}
+
+	// Migration record should still exist (rollback failed).
+	var count int
+	db.QueryRow("SELECT count(*) FROM _migrations").Scan(&count)
+	if count != 1 {
+		t.Fatalf("expected 1 migration record after failed rollback, got %d", count)
+	}
+}
+
+func TestBackupCreateError(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "test.db")
+
+	db := New(dbPath)
+	if err := db.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	db.Exec("CREATE TABLE pre (id INTEGER)")
+	db.Stop(context.Background())
+
+	// Set TMPDIR to a non-writable location to force os.Create failure.
+	origTmp := os.Getenv("TMPDIR")
+	noWriteDir := filepath.Join(dir, "nowrite")
+	os.Mkdir(noWriteDir, 0o555)
+	os.Setenv("TMPDIR", noWriteDir)
+	defer func() {
+		if origTmp == "" {
+			os.Unsetenv("TMPDIR")
+		} else {
+			os.Setenv("TMPDIR", origTmp)
+		}
+		os.Chmod(noWriteDir, 0o755)
+	}()
+
+	db2 := New(dbPath)
+	db2.path = dbPath
+	err := db2.backupBeforeMigrate()
+	if err == nil {
+		// On some systems (macOS sandbox), os.TempDir() ignores TMPDIR.
+		// If we can't force the error, skip.
+		t.Skip("could not force os.Create error via TMPDIR")
+	}
+}

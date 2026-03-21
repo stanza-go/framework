@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -583,6 +584,144 @@ func TestLoggerChildInheritsLevel(t *testing.T) {
 	}
 	if entries[0]["level"] != "warn" {
 		t.Errorf("level = %v, want warn", entries[0]["level"])
+	}
+}
+
+func TestFileWriterBadPath(t *testing.T) {
+	// Try to create a FileWriter in a path that can't be created.
+	_, err := NewFileWriter("/dev/null/impossible/path")
+	if err == nil {
+		t.Fatal("expected error for impossible path")
+	}
+}
+
+func TestFileWriterPruneWithNonLogFiles(t *testing.T) {
+	dir := t.TempDir()
+
+	fw, err := NewFileWriter(dir, WithMaxFiles(2))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer fw.Close()
+
+	// Create non-log files that should be ignored by prune.
+	os.WriteFile(filepath.Join(dir, "other.txt"), []byte("not a log"), 0o644)
+	os.WriteFile(filepath.Join(dir, "readme.md"), []byte("readme"), 0o644)
+
+	// Create a subdirectory that should be skipped.
+	os.Mkdir(filepath.Join(dir, "subdir"), 0o755)
+
+	// Create more rotated files than maxFiles to trigger pruning.
+	for i := range 5 {
+		name := fmt.Sprintf("stanza-2026-01-%02d.log", i+1)
+		os.WriteFile(filepath.Join(dir, name), []byte("log data"), 0o644)
+	}
+
+	// Write to trigger rotation and pruning.
+	fw.mu.Lock()
+	fw.prune()
+	fw.mu.Unlock()
+
+	// Count remaining rotated files — should be maxFiles (2).
+	entries, _ := os.ReadDir(dir)
+	var rotated int
+	for _, e := range entries {
+		if !e.IsDir() && e.Name() != "stanza.log" &&
+			strings.HasPrefix(e.Name(), "stanza-") && strings.HasSuffix(e.Name(), ".log") {
+			rotated++
+		}
+	}
+	if rotated != 2 {
+		t.Errorf("rotated files = %d, want 2", rotated)
+	}
+
+	// Non-log files and directory should still exist.
+	if _, err := os.Stat(filepath.Join(dir, "other.txt")); err != nil {
+		t.Error("other.txt should not be pruned")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "subdir")); err != nil {
+		t.Error("subdir should not be pruned")
+	}
+}
+
+func TestFileWriterPruneBelowMax(t *testing.T) {
+	dir := t.TempDir()
+
+	fw, err := NewFileWriter(dir, WithMaxFiles(10))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer fw.Close()
+
+	// Create fewer rotated files than maxFiles.
+	for i := range 3 {
+		name := fmt.Sprintf("stanza-2026-01-%02d.log", i+1)
+		os.WriteFile(filepath.Join(dir, name), []byte("log data"), 0o644)
+	}
+
+	fw.mu.Lock()
+	fw.prune()
+	fw.mu.Unlock()
+
+	// All 3 should remain (below maxFiles=10).
+	entries, _ := os.ReadDir(dir)
+	var rotated int
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "stanza-") && strings.HasSuffix(e.Name(), ".log") {
+			rotated++
+		}
+	}
+	if rotated != 3 {
+		t.Errorf("rotated files = %d, want 3", rotated)
+	}
+}
+
+func TestFileWriterRotationByDate(t *testing.T) {
+	dir := t.TempDir()
+
+	fw, err := NewFileWriter(dir)
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer fw.Close()
+
+	// Write some data.
+	fw.Write([]byte("line 1\n"))
+
+	// Force a different date to trigger date-based rotation.
+	fw.mu.Lock()
+	fw.curDate = "2020-01-01"
+	fw.mu.Unlock()
+
+	fw.Write([]byte("line 2\n"))
+
+	// Should have created a rotated file.
+	entries, _ := os.ReadDir(dir)
+	var rotated int
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "stanza-") && strings.HasSuffix(e.Name(), ".log") {
+			rotated++
+		}
+	}
+	if rotated < 1 {
+		t.Error("expected at least one rotated file after date change")
+	}
+}
+
+func TestFileWriterOptions(t *testing.T) {
+	dir := t.TempDir()
+
+	fw, err := NewFileWriter(dir, WithMaxSize(1024), WithMaxFiles(3))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	defer fw.Close()
+
+	if fw.maxSize != 1024 {
+		t.Errorf("maxSize = %d, want 1024", fw.maxSize)
+	}
+	if fw.maxFiles != 3 {
+		t.Errorf("maxFiles = %d, want 3", fw.maxFiles)
 	}
 }
 
