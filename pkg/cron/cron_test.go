@@ -624,3 +624,113 @@ func TestParseFieldRangeWithStep(t *testing.T) {
 		t.Error("bit 5 should not be set for 0-30/10")
 	}
 }
+
+// === OnComplete Callback Tests ===
+
+func TestOnComplete_Success(t *testing.T) {
+	var mu sync.Mutex
+	var runs []CompletedRun
+
+	s := NewScheduler(WithOnComplete(func(r CompletedRun) {
+		mu.Lock()
+		runs = append(runs, r)
+		mu.Unlock()
+	}))
+
+	if err := s.Add("cb-job", "* * * * *", func(_ context.Context) error {
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	if err := s.Trigger("cb-job"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Wait for callback.
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(runs)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for onComplete callback")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	r := runs[0]
+	mu.Unlock()
+
+	if r.Name != "cb-job" {
+		t.Errorf("name = %q, want cb-job", r.Name)
+	}
+	if r.Err != nil {
+		t.Errorf("err = %v, want nil", r.Err)
+	}
+	if r.Duration <= 0 {
+		t.Errorf("duration = %v, want > 0", r.Duration)
+	}
+	if r.Started.IsZero() {
+		t.Error("started is zero")
+	}
+}
+
+func TestOnComplete_Error(t *testing.T) {
+	var mu sync.Mutex
+	var runs []CompletedRun
+
+	s := NewScheduler(WithOnComplete(func(r CompletedRun) {
+		mu.Lock()
+		runs = append(runs, r)
+		mu.Unlock()
+	}))
+
+	jobErr := errors.New("job failed")
+	if err := s.Add("fail-job", "* * * * *", func(_ context.Context) error {
+		return jobErr
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop(context.Background())
+
+	if err := s.Trigger("fail-job"); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(runs)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for onComplete callback")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mu.Lock()
+	r := runs[0]
+	mu.Unlock()
+
+	if r.Name != "fail-job" {
+		t.Errorf("name = %q, want fail-job", r.Name)
+	}
+	if !errors.Is(r.Err, jobErr) {
+		t.Errorf("err = %v, want %v", r.Err, jobErr)
+	}
+}

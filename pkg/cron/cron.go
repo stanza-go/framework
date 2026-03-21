@@ -60,16 +60,26 @@ type job struct {
 	lastErr  error
 }
 
+// CompletedRun contains information about a completed job execution. Passed to
+// the OnComplete callback registered via WithOnComplete.
+type CompletedRun struct {
+	Name     string
+	Started  time.Time
+	Duration time.Duration
+	Err      error
+}
+
 // Scheduler manages registered cron jobs and executes them on schedule.
 type Scheduler struct {
-	mu       sync.Mutex
-	jobs     []*job
-	location *time.Location
-	logger   *log.Logger
-	ctx      context.Context
-	cancel   context.CancelFunc
-	wg       sync.WaitGroup
-	started  bool
+	mu         sync.Mutex
+	jobs       []*job
+	location   *time.Location
+	logger     *log.Logger
+	onComplete func(CompletedRun)
+	ctx        context.Context
+	cancel     context.CancelFunc
+	wg         sync.WaitGroup
+	started    bool
 }
 
 // Option configures a Scheduler.
@@ -88,6 +98,16 @@ func WithLocation(loc *time.Location) Option {
 func WithLogger(l *log.Logger) Option {
 	return func(s *Scheduler) {
 		s.logger = l
+	}
+}
+
+// WithOnComplete registers a callback invoked after each job execution. The
+// callback receives the job name, start time, duration, and any error. It runs
+// in the same goroutine as the job, so it should return quickly. Use this to
+// persist execution history to a database.
+func WithOnComplete(fn func(CompletedRun)) Option {
+	return func(s *Scheduler) {
+		s.onComplete = fn
 	}
 }
 
@@ -352,7 +372,17 @@ func (s *Scheduler) execute(ctx context.Context, j *job) {
 	if j.enabled {
 		j.nextRun = j.schedule.next(time.Now().In(s.location))
 	}
+	onComplete := s.onComplete
 	s.mu.Unlock()
+
+	if onComplete != nil {
+		onComplete(CompletedRun{
+			Name:     j.name,
+			Started:  start,
+			Duration: elapsed,
+			Err:      err,
+		})
+	}
 
 	if err != nil {
 		s.logError("cron job failed",
