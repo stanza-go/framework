@@ -51,7 +51,7 @@ const (
 )
 
 // websocketGUID is the magic GUID specified in RFC 6455, Section 4.2.2.
-const websocketGUID = "258EAFA5-E914-47DA-95CA-5AB53F89FEED"
+const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 // Default buffer sizes.
 const (
