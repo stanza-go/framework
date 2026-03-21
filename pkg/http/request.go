@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"strconv"
+	"strings"
 )
 
 const maxBodySize int64 = 1 << 20 // 1 MB
@@ -48,6 +49,37 @@ func QueryParamInt(r *Request, name string, fallback int) int {
 		return fallback
 	}
 	return v
+}
+
+// QueryParamSort reads "sort" and "order" query parameters and validates
+// them against the allowed columns. Returns the validated column and
+// direction ("ASC" or "DESC"). If the sort parameter is missing or not
+// in the allowed list, the defaults are returned.
+//
+// Example:
+//
+//	col, dir := http.QueryParamSort(r, []string{"id", "email", "name", "created_at"}, "id", "DESC")
+//	selectQ.OrderBy(col, dir)
+func QueryParamSort(r *Request, allowed []string, defaultCol, defaultDir string) (string, string) {
+	col := strings.ToLower(r.URL.Query().Get("sort"))
+	dir := strings.ToUpper(r.URL.Query().Get("order"))
+
+	validCol := false
+	for _, a := range allowed {
+		if col == a {
+			validCol = true
+			break
+		}
+	}
+	if !validCol {
+		col = defaultCol
+	}
+
+	if dir != "ASC" && dir != "DESC" {
+		dir = defaultDir
+	}
+
+	return col, dir
 }
 
 // ReadJSON decodes the JSON request body into v. The body is limited
