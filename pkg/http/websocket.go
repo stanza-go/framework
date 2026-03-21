@@ -127,7 +127,7 @@ func (u Upgrader) Upgrade(w ResponseWriter, r *Request) (*Conn, error) {
 		return nil, writeUpgradeError(w, StatusForbidden, "origin not allowed")
 	}
 
-	hj, ok := w.(nethttp.Hijacker)
+	hj, ok := findHijacker(w)
 	if !ok {
 		return nil, writeUpgradeError(w, StatusInternalServerError, "server does not support connection hijacking")
 	}
@@ -620,6 +620,23 @@ func headerContains(h nethttp.Header, key, target string) bool {
 func writeUpgradeError(w ResponseWriter, status int, msg string) error {
 	nethttp.Error(w, msg, status)
 	return fmt.Errorf("websocket: %s", msg)
+}
+
+// findHijacker walks the ResponseWriter wrapper chain to find a
+// Hijacker. Middleware that wraps ResponseWriter should implement
+// Unwrap() ResponseWriter so that WebSocket upgrades work through the
+// middleware chain.
+func findHijacker(w ResponseWriter) (nethttp.Hijacker, bool) {
+	for {
+		if hj, ok := w.(nethttp.Hijacker); ok {
+			return hj, true
+		}
+		unwrapper, ok := w.(interface{ Unwrap() ResponseWriter })
+		if !ok {
+			return nil, false
+		}
+		w = unwrapper.Unwrap()
+	}
 }
 
 // GenerateKey generates a random Sec-WebSocket-Key for client use

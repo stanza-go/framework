@@ -95,6 +95,13 @@ type responseRecorder struct {
 	wroteHeader bool
 }
 
+// Unwrap returns the underlying ResponseWriter. This allows middleware
+// further down the chain (such as the WebSocket upgrader) to find the
+// original writer and its Hijacker interface.
+func (rec *responseRecorder) Unwrap() ResponseWriter {
+	return rec.ResponseWriter
+}
+
 // WriteHeader captures the status code and delegates to the wrapped
 // ResponseWriter. Only the first call is forwarded; subsequent calls
 // are silently ignored to prevent "superfluous WriteHeader" warnings

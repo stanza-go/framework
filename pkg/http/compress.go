@@ -200,6 +200,13 @@ func (cw *compressWriter) flush() error {
 	return err
 }
 
+// Unwrap returns the underlying ResponseWriter. This allows middleware
+// further down the chain (such as the WebSocket upgrader) to find the
+// original writer and its Hijacker interface.
+func (cw *compressWriter) Unwrap() ResponseWriter {
+	return cw.ResponseWriter
+}
+
 // Close finalizes the response. If compression was not decided yet
 // (response smaller than minSize), it flushes uncompressed. If a gzip
 // writer was started, it flushes and returns it to the pool.

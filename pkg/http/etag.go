@@ -68,6 +68,13 @@ type etagWriter struct {
 	wroteHeader bool
 }
 
+// Unwrap returns the underlying ResponseWriter. This allows middleware
+// further down the chain (such as the WebSocket upgrader) to find the
+// original writer and its Hijacker interface.
+func (ew *etagWriter) Unwrap() ResponseWriter {
+	return ew.ResponseWriter
+}
+
 // WriteHeader captures the status code without forwarding it.
 func (ew *etagWriter) WriteHeader(code int) {
 	if ew.wroteHeader {
