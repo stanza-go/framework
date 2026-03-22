@@ -1352,3 +1352,118 @@ func TestCount_WhereOr(t *testing.T) {
 		t.Errorf("args = %v, want %v", args, wantArgs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WhereNotIn
+// ---------------------------------------------------------------------------
+
+func TestSelect_WhereNotIn(t *testing.T) {
+	sql, args := Select("id", "name").
+		From("users").
+		WhereNotIn("id", 1, 2, 3).
+		Build()
+
+	wantSQL := "SELECT id, name FROM users WHERE id NOT IN (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1, 2, 3}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereNotInSingleValue(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		WhereNotIn("status", "banned").
+		Build()
+
+	wantSQL := "SELECT id FROM users WHERE status NOT IN (?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"banned"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereNotInEmpty(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		WhereNotIn("id").
+		Build()
+
+	wantSQL := "SELECT id FROM users WHERE 1 = 1"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want empty", args)
+	}
+}
+
+func TestSelect_WhereNotInWithWhere(t *testing.T) {
+	sql, args := Select("id", "email").
+		From("users").
+		Where("deleted_at IS NULL").
+		WhereNotIn("role", "admin", "superadmin").
+		OrderBy("name", "ASC").
+		Build()
+
+	wantSQL := "SELECT id, email FROM users WHERE deleted_at IS NULL AND role NOT IN (?, ?) ORDER BY name ASC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"admin", "superadmin"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_WhereNotIn(t *testing.T) {
+	sql, args := Update("users").
+		Set("status", "inactive").
+		WhereNotIn("id", 1, 2).
+		Build()
+
+	wantSQL := "UPDATE users SET status = ? WHERE id NOT IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"inactive", 1, 2}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestDelete_WhereNotIn(t *testing.T) {
+	sql, args := Delete("sessions").
+		WhereNotIn("user_id", 10, 20, 30).
+		Build()
+
+	wantSQL := "DELETE FROM sessions WHERE user_id NOT IN (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{10, 20, 30}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestCount_WhereNotIn(t *testing.T) {
+	sql, args := Count("users").
+		WhereNotIn("status", "banned", "deleted").
+		Build()
+
+	wantSQL := "SELECT COUNT(*) FROM users WHERE status NOT IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"banned", "deleted"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}

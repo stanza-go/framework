@@ -258,6 +258,20 @@ func (b *SelectBuilder) WhereIn(column string, values ...any) *SelectBuilder {
 	return b
 }
 
+// WhereNotIn adds a "column NOT IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 1" (always true — everything is NOT IN an empty set).
+func (b *SelectBuilder) WhereNotIn(column string, values ...any) *SelectBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 1"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " NOT IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
 // WhereOr adds conditions grouped with OR. Each Cond is OR'd together and
 // the group is parenthesized so it composes correctly with other AND conditions.
 // Requires at least 2 conditions; fewer is a no-op (use Where for single conditions).
@@ -499,6 +513,20 @@ func (b *CountBuilder) WhereIn(column string, values ...any) *CountBuilder {
 	}
 	b.wheres = append(b.wheres, whereClause{
 		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
+// WhereNotIn adds a "column NOT IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 1" (always true).
+func (b *CountBuilder) WhereNotIn(column string, values ...any) *CountBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 1"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " NOT IN " + inPlaceholders(len(values)),
 		args: values,
 	})
 	return b
@@ -829,6 +857,20 @@ func (b *UpdateBuilder) WhereIn(column string, values ...any) *UpdateBuilder {
 	return b
 }
 
+// WhereNotIn adds a "column NOT IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 1" (always true).
+func (b *UpdateBuilder) WhereNotIn(column string, values ...any) *UpdateBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 1"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " NOT IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
 // WhereOr adds conditions grouped with OR.
 // See SelectBuilder.WhereOr for details.
 func (b *UpdateBuilder) WhereOr(conds ...Condition) *UpdateBuilder {
@@ -939,6 +981,20 @@ func (b *DeleteBuilder) WhereIn(column string, values ...any) *DeleteBuilder {
 	}
 	b.wheres = append(b.wheres, whereClause{
 		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
+// WhereNotIn adds a "column NOT IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 1" (always true).
+func (b *DeleteBuilder) WhereNotIn(column string, values ...any) *DeleteBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 1"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " NOT IN " + inPlaceholders(len(values)),
 		args: values,
 	})
 	return b
