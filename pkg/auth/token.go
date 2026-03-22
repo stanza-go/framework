@@ -136,6 +136,28 @@ func HashToken(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// GenerateAPIKey creates a cryptographically random API key with the
+// given prefix (e.g., "stza_"). It returns the full key, a short
+// display prefix for identification, and the SHA-256 hash for storage.
+//
+// The display prefix is the first len(prefix)+8 characters of the full
+// key — enough for identification but not reconstruction:
+//
+//	fullKey, prefix, hash, err := auth.GenerateAPIKey("stza_")
+//	// fullKey:  "stza_a1b2c3d4e5f6..." (prefix + 64 hex chars)
+//	// prefix:   "stza_a1b2c3d4"        (first 13 chars)
+//	// hash:     "9f86d081884c..."       (SHA-256 for DB storage)
+func GenerateAPIKey(prefix string) (fullKey, displayPrefix, keyHash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", "", fmt.Errorf("auth: generate api key: %w", err)
+	}
+	fullKey = prefix + hex.EncodeToString(b)
+	displayPrefix = fullKey[:len(prefix)+8]
+	keyHash = HashToken(fullKey)
+	return fullKey, displayPrefix, keyHash, nil
+}
+
 // RefreshTokenTTL returns the configured refresh token lifetime. Use
 // this when setting the expires_at column in the database.
 func (a *Auth) RefreshTokenTTL() time.Duration {

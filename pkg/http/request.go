@@ -115,6 +115,25 @@ func ReadJSONLimit(r *Request, v any, maxBytes int64) error {
 	return nil
 }
 
+// CheckBulkIDs validates that an int64 ID slice is non-empty and does
+// not exceed maxCount. If invalid, it writes a 400 error response and
+// returns false. The caller should return immediately when false:
+//
+//	if !http.CheckBulkIDs(w, req.IDs, 100) {
+//	    return
+//	}
+func CheckBulkIDs(w ResponseWriter, ids []int64, maxCount int) bool {
+	if len(ids) == 0 {
+		WriteError(w, StatusBadRequest, "ids required")
+		return false
+	}
+	if len(ids) > maxCount {
+		WriteError(w, StatusBadRequest, "maximum "+strconv.Itoa(maxCount)+" ids per request")
+		return false
+	}
+	return true
+}
+
 // bodyLimitReader wraps an io.Reader with a byte limit. Unlike
 // io.LimitReader, it returns ErrBodyTooLarge instead of io.EOF when
 // the limit is reached, giving callers a clear signal that the body
