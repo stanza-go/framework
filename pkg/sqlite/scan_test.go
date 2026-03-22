@@ -5,6 +5,135 @@ import (
 	"testing"
 )
 
+func TestQueryOne_Basic(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec("CREATE TABLE things (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO things (name) VALUES (?), (?)", "alpha", "beta"); err != nil {
+		t.Fatal(err)
+	}
+
+	type thing struct {
+		ID   int64
+		Name string
+	}
+
+	th, err := QueryOne(db, "SELECT id, name FROM things WHERE id = ?", []any{int64(1)}, func(rows *Rows) (thing, error) {
+		var t thing
+		err := rows.Scan(&t.ID, &t.Name)
+		return t, err
+	})
+	if err != nil {
+		t.Fatalf("QueryOne: %v", err)
+	}
+	if th.Name != "alpha" {
+		t.Errorf("name = %q, want %q", th.Name, "alpha")
+	}
+}
+
+func TestQueryOne_NotFound(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec("CREATE TABLE nf (id INTEGER PRIMARY KEY)"); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := QueryOne(db, "SELECT id FROM nf WHERE id = ?", []any{int64(999)}, func(rows *Rows) (int64, error) {
+		var id int64
+		err := rows.Scan(&id)
+		return id, err
+	})
+	if !errors.Is(err, ErrNoRows) {
+		t.Fatalf("got err %v, want ErrNoRows", err)
+	}
+}
+
+func TestQueryOne_ScanError(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec("CREATE TABLE se (id INTEGER PRIMARY KEY, val TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO se (val) VALUES (?)", "hi"); err != nil {
+		t.Fatal(err)
+	}
+
+	scanErr := errors.New("scan broke")
+	_, err := QueryOne(db, "SELECT id, val FROM se", nil, func(rows *Rows) (int, error) {
+		return 0, scanErr
+	})
+	if !errors.Is(err, scanErr) {
+		t.Fatalf("got err %v, want %v", err, scanErr)
+	}
+}
+
+func TestQueryOne_BadSQL(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := QueryOne(db, "SELECT * FROM ghost_table", nil, func(rows *Rows) (int, error) {
+		return 0, nil
+	})
+	if err == nil {
+		t.Fatal("expected error for bad SQL")
+	}
+	if errors.Is(err, ErrNoRows) {
+		t.Fatal("error should not be ErrNoRows for bad SQL")
+	}
+}
+
+func TestQueryOne_WithBuilder(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec("CREATE TABLE accounts (id INTEGER PRIMARY KEY, email TEXT, active INTEGER)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO accounts (email, active) VALUES (?, ?), (?, ?)", "a@b.com", 1, "c@d.com", 0); err != nil {
+		t.Fatal(err)
+	}
+
+	type account struct {
+		ID    int64
+		Email string
+	}
+
+	sql, args := Select("id", "email").
+		From("accounts").
+		Where("active = ?", 1).
+		Build()
+
+	acc, err := QueryOne(db, sql, args, func(rows *Rows) (account, error) {
+		var a account
+		err := rows.Scan(&a.ID, &a.Email)
+		return a, err
+	})
+	if err != nil {
+		t.Fatalf("QueryOne: %v", err)
+	}
+	if acc.Email != "a@b.com" {
+		t.Errorf("email = %q, want %q", acc.Email, "a@b.com")
+	}
+}
+
+func TestQueryOne_IgnoresExtraRows(t *testing.T) {
+	db := openTestDB(t)
+	if _, err := db.Exec("CREATE TABLE multi (id INTEGER PRIMARY KEY, val TEXT)"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO multi (val) VALUES (?), (?), (?)", "first", "second", "third"); err != nil {
+		t.Fatal(err)
+	}
+
+	val, err := QueryOne(db, "SELECT val FROM multi ORDER BY id", nil, func(rows *Rows) (string, error) {
+		var v string
+		err := rows.Scan(&v)
+		return v, err
+	})
+	if err != nil {
+		t.Fatalf("QueryOne: %v", err)
+	}
+	if val != "first" {
+		t.Errorf("val = %q, want %q", val, "first")
+	}
+}
+
 func TestQueryAll_Basic(t *testing.T) {
 	db := openTestDB(t)
 	if _, err := db.Exec("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)"); err != nil {

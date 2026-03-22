@@ -20,6 +20,62 @@ package sqlite
 //		err := rows.Scan(&u.ID, &u.Email, &u.Name)
 //		return u, err
 //	})
+// QueryOne executes a query and scans the first result row using the
+// provided function. It handles the full lifecycle: query execution,
+// row scanning, error checking, and resource cleanup.
+//
+// The scan function is called once and should only call rows.Scan to
+// read column values into the returned value. It uses the same
+// signature as QueryAll, so the same scan function works for both
+// single-row and multi-row queries.
+//
+// If the query returns no rows, QueryOne returns ErrNoRows. Extra
+// rows beyond the first are ignored.
+//
+//	sql, args := sqlite.Select("id", "email", "name").
+//		From("users").
+//		Where("id = ?", id).
+//		Build()
+//	user, err := sqlite.QueryOne(db, sql, args, func(rows *sqlite.Rows) (User, error) {
+//		var u User
+//		err := rows.Scan(&u.ID, &u.Email, &u.Name)
+//		return u, err
+//	})
+func QueryOne[T any](db *DB, sql string, args []any, scan func(*Rows) (T, error)) (T, error) {
+	rows, err := db.Query(sql, args...)
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		var zero T
+		return zero, ErrNoRows
+	}
+	return scan(rows)
+}
+
+// QueryAll executes a query and scans all result rows using the
+// provided function. It handles the full lifecycle: query execution,
+// iteration, row scanning, error checking, and resource cleanup.
+//
+// The scan function is called once per row and should only call
+// rows.Scan to read column values into the returned value.
+//
+// QueryAll always returns a non-nil slice (empty when no rows match),
+// which serializes to [] in JSON instead of null.
+//
+//	sql, args := sqlite.Select("id", "email", "name").
+//		From("users").
+//		Where("deleted_at IS NULL").
+//		OrderBy("id", "ASC").
+//		Build()
+//	users, err := sqlite.QueryAll(db, sql, args, func(rows *sqlite.Rows) (User, error) {
+//		var u User
+//		err := rows.Scan(&u.ID, &u.Email, &u.Name)
+//		return u, err
+//	})
 func QueryAll[T any](db *DB, sql string, args []any, scan func(*Rows) (T, error)) ([]T, error) {
 	rows, err := db.Query(sql, args...)
 	if err != nil {
