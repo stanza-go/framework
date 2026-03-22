@@ -47,6 +47,8 @@ type SelectBuilder struct {
 	table     string
 	joins     []joinClause
 	wheres    []whereClause
+	groupBys  []string
+	havings   []whereClause
 	orderBys  []orderByClause
 	limit     int
 	offset    int
@@ -81,6 +83,19 @@ func (b *SelectBuilder) Join(table, on string) *SelectBuilder {
 // LeftJoin adds a LEFT JOIN clause.
 func (b *SelectBuilder) LeftJoin(table, on string) *SelectBuilder {
 	b.joins = append(b.joins, joinClause{kind: "LEFT JOIN", table: table, on: on})
+	return b
+}
+
+// GroupBy adds GROUP BY columns. Multiple calls append to the list.
+func (b *SelectBuilder) GroupBy(columns ...string) *SelectBuilder {
+	b.groupBys = append(b.groupBys, columns...)
+	return b
+}
+
+// Having adds a HAVING condition (used with GROUP BY). Multiple calls
+// are joined with AND, same as Where.
+func (b *SelectBuilder) Having(cond string, args ...any) *SelectBuilder {
+	b.havings = append(b.havings, whereClause{cond: cond, args: args})
 	return b
 }
 
@@ -124,6 +139,22 @@ func (b *SelectBuilder) Build() (string, []any) {
 	}
 
 	args = appendWheres(&sb, b.wheres, args)
+
+	if len(b.groupBys) > 0 {
+		sb.WriteString(" GROUP BY ")
+		sb.WriteString(strings.Join(b.groupBys, ", "))
+	}
+
+	if len(b.havings) > 0 {
+		sb.WriteString(" HAVING ")
+		for i, h := range b.havings {
+			if i > 0 {
+				sb.WriteString(" AND ")
+			}
+			sb.WriteString(h.cond)
+			args = append(args, h.args...)
+		}
+	}
 
 	if len(b.orderBys) > 0 {
 		sb.WriteString(" ORDER BY ")
@@ -256,14 +287,18 @@ func (b *InsertBuilder) Build() (string, []any) {
 // UPDATE
 // ---------------------------------------------------------------------------
 
-// UpdateBuilder builds UPDATE queries. Use Set to add column-value pairs
-// and Where for conditions. This allows conditional field updates by
-// chaining Set calls only when needed.
+// setClause holds a SET assignment — either "col = ?" or "col = expr".
+type setClause struct {
+	sql  string
+	args []any
+}
+
+// UpdateBuilder builds UPDATE queries. Use Set to add column-value pairs,
+// SetExpr for raw SQL expressions, and Where for conditions.
 type UpdateBuilder struct {
-	table   string
-	columns []string
-	values  []any
-	wheres  []whereClause
+	table  string
+	sets   []setClause
+	wheres []whereClause
 }
 
 // Update starts building an UPDATE query for the given table.
@@ -273,8 +308,16 @@ func Update(table string) *UpdateBuilder {
 
 // Set adds a column = ? assignment.
 func (b *UpdateBuilder) Set(column string, value any) *UpdateBuilder {
-	b.columns = append(b.columns, column)
-	b.values = append(b.values, value)
+	b.sets = append(b.sets, setClause{sql: column + " = ?", args: []any{value}})
+	return b
+}
+
+// SetExpr adds a column = <expr> assignment using a raw SQL expression.
+// Use this for computed updates like "request_count = request_count + 1"
+// or "updated_at = datetime('now')". Pass args for any ? placeholders
+// in the expression.
+func (b *UpdateBuilder) SetExpr(column, expr string, args ...any) *UpdateBuilder {
+	b.sets = append(b.sets, setClause{sql: column + " = " + expr, args: args})
 	return b
 }
 
@@ -293,14 +336,13 @@ func (b *UpdateBuilder) Build() (string, []any) {
 	sb.WriteString("UPDATE ")
 	sb.WriteString(b.table)
 	sb.WriteString(" SET ")
-	for i, col := range b.columns {
+	for i, s := range b.sets {
 		if i > 0 {
 			sb.WriteString(", ")
 		}
-		sb.WriteString(col)
-		sb.WriteString(" = ?")
+		sb.WriteString(s.sql)
+		args = append(args, s.args...)
 	}
-	args = append(args, b.values...)
 
 	args = appendWheres(&sb, b.wheres, args)
 

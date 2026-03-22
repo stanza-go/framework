@@ -681,3 +681,188 @@ func TestUpdate_SetArgOrder(t *testing.T) {
 		t.Errorf("args = %v, want %v", args, wantArgs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SetExpr
+// ---------------------------------------------------------------------------
+
+func TestUpdate_SetExprIncrement(t *testing.T) {
+	sql, args := Update("api_keys").
+		Set("last_used_at", "2024-01-01").
+		SetExpr("request_count", "request_count + 1").
+		Where("id = ?", 42).
+		Build()
+
+	wantSQL := "UPDATE api_keys SET last_used_at = ?, request_count = request_count + 1 WHERE id = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2024-01-01", 42}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_SetExprWithArgs(t *testing.T) {
+	sql, args := Update("counters").
+		SetExpr("value", "value + ?", 5).
+		Where("name = ?", "hits").
+		Build()
+
+	wantSQL := "UPDATE counters SET value = value + ? WHERE name = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{5, "hits"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_SetExprNoArgs(t *testing.T) {
+	sql, args := Update("jobs").
+		SetExpr("updated_at", "datetime('now')").
+		Where("id = ?", 1).
+		Build()
+
+	wantSQL := "UPDATE jobs SET updated_at = datetime('now') WHERE id = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_MixedSetAndSetExpr(t *testing.T) {
+	sql, args := Update("api_keys").
+		Set("last_used_at", "2024-01-01").
+		SetExpr("request_count", "request_count + 1").
+		Set("status", "active").
+		Where("id = ?", 42).
+		Build()
+
+	wantSQL := "UPDATE api_keys SET last_used_at = ?, request_count = request_count + 1, status = ? WHERE id = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	// Set args and SetExpr args interleaved in order, then WHERE args
+	wantArgs := []any{"2024-01-01", "active", 42}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GroupBy / Having
+// ---------------------------------------------------------------------------
+
+func TestSelect_GroupBy(t *testing.T) {
+	sql, args := Select("date(created_at) as day", "COUNT(*) as cnt").
+		From("users").
+		Where("created_at >= ?", "2024-01-01").
+		GroupBy("day").
+		OrderBy("day", "ASC").
+		Build()
+
+	wantSQL := "SELECT date(created_at) as day, COUNT(*) as cnt FROM users WHERE created_at >= ? GROUP BY day ORDER BY day ASC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2024-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_GroupByMultipleColumns(t *testing.T) {
+	sql, args := Select("status", "type", "COUNT(*) as cnt").
+		From("jobs").
+		GroupBy("status", "type").
+		Build()
+
+	wantSQL := "SELECT status, type, COUNT(*) as cnt FROM jobs GROUP BY status, type"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if args != nil {
+		t.Errorf("args = %v, want nil", args)
+	}
+}
+
+func TestSelect_GroupByHaving(t *testing.T) {
+	sql, args := Select("status", "COUNT(*) as cnt").
+		From("jobs").
+		GroupBy("status").
+		Having("COUNT(*) > ?", 10).
+		OrderBy("cnt", "DESC").
+		Build()
+
+	wantSQL := "SELECT status, COUNT(*) as cnt FROM jobs GROUP BY status HAVING COUNT(*) > ? ORDER BY cnt DESC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{10}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_GroupByHavingMultiple(t *testing.T) {
+	sql, args := Select("type", "COUNT(*) as cnt", "AVG(duration) as avg_dur").
+		From("jobs").
+		Where("created_at >= ?", "2024-01-01").
+		GroupBy("type").
+		Having("COUNT(*) > ?", 5).
+		Having("AVG(duration) < ?", 1000).
+		OrderBy("cnt", "DESC").
+		Build()
+
+	wantSQL := "SELECT type, COUNT(*) as cnt, AVG(duration) as avg_dur FROM jobs WHERE created_at >= ? GROUP BY type HAVING COUNT(*) > ? AND AVG(duration) < ? ORDER BY cnt DESC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2024-01-01", 5, 1000}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_GroupByWithCaseExpr(t *testing.T) {
+	// Dashboard-style aggregation: jobs by day with conditional sums
+	sql, args := Select(
+		"date(created_at) as day",
+		"SUM(CASE WHEN status IN ('completed') THEN 1 ELSE 0 END) as completed",
+		"SUM(CASE WHEN status IN ('failed','dead') THEN 1 ELSE 0 END) as failed",
+	).
+		From("_queue_jobs").
+		Where("created_at >= ?", "2024-01-01").
+		GroupBy("day").
+		OrderBy("day", "ASC").
+		Build()
+
+	wantSQL := "SELECT date(created_at) as day, SUM(CASE WHEN status IN ('completed') THEN 1 ELSE 0 END) as completed, SUM(CASE WHEN status IN ('failed','dead') THEN 1 ELSE 0 END) as failed FROM _queue_jobs WHERE created_at >= ? GROUP BY day ORDER BY day ASC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2024-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_GroupByNoWhere(t *testing.T) {
+	sql, args := Select("status", "COUNT(*)").
+		From("jobs").
+		GroupBy("status").
+		Build()
+
+	wantSQL := "SELECT status, COUNT(*) FROM jobs GROUP BY status"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if args != nil {
+		t.Errorf("args = %v, want nil", args)
+	}
+}
