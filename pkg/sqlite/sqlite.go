@@ -516,6 +516,17 @@ func (db *DB) QueryRow(sql string, args ...any) *Row {
 	return &Row{rows: rows}
 }
 
+// Count executes a count query derived from the given SelectBuilder and
+// returns the number of matching rows. It combines CountFrom, Build, and
+// QueryRow into a single call — the common pattern for paginated list
+// endpoints.
+func (db *DB) Count(sb *SelectBuilder) (int, error) {
+	sql, args := CountFrom(sb).Build()
+	var n int
+	err := db.QueryRow(sql, args...).Scan(&n)
+	return n, err
+}
+
 // Path returns the database file path.
 func (db *DB) Path() string {
 	return db.path
