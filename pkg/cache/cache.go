@@ -30,6 +30,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -44,6 +45,10 @@ type Cache[V any] struct {
 	stopCh   chan struct{}
 	stopped  bool
 	now      func() time.Time // for testing; defaults to time.Now
+
+	totalHits      atomic.Int64
+	totalMisses    atomic.Int64
+	totalEvictions atomic.Int64
 }
 
 type entry[V any] struct {
@@ -135,15 +140,19 @@ func (c *Cache[V]) Get(key string) (V, bool) {
 
 	e, ok := c.items[key]
 	if !ok {
+		c.totalMisses.Add(1)
 		var zero V
 		return zero, false
 	}
 	if c.now().After(e.expiresAt) {
 		c.deleteLocked(key)
+		c.totalMisses.Add(1)
+		c.totalEvictions.Add(1)
 		var zero V
 		return zero, false
 	}
 	e.accessedAt = c.now()
+	c.totalHits.Add(1)
 	return e.value, true
 }
 
@@ -260,6 +269,32 @@ func (c *Cache[V]) Keys() []string {
 	return keys
 }
 
+// CacheStats holds cache performance counters.
+type CacheStats struct {
+	Size      int   `json:"size"`      // current number of entries
+	MaxSize   int   `json:"max_size"`  // configured maximum (0 = unlimited)
+	Hits      int64 `json:"hits"`      // total cache hits (key found and not expired)
+	Misses    int64 `json:"misses"`    // total cache misses (key not found or expired)
+	Evictions int64 `json:"evictions"` // total involuntary removals (TTL expiry + LRU)
+}
+
+// Stats returns a snapshot of cache performance counters. The counters
+// are cumulative since the cache was created. Size is the current number
+// of entries (including expired entries not yet cleaned up).
+func (c *Cache[V]) Stats() CacheStats {
+	c.mu.RLock()
+	size := len(c.items)
+	c.mu.RUnlock()
+
+	return CacheStats{
+		Size:      size,
+		MaxSize:   c.maxSize,
+		Hits:      c.totalHits.Load(),
+		Misses:    c.totalMisses.Load(),
+		Evictions: c.totalEvictions.Load(),
+	}
+}
+
 // Close stops the background cleanup goroutine. After Close, the cache
 // can still be used for Get/Set/Delete but no automatic cleanup occurs.
 // Close is safe to call multiple times.
@@ -291,13 +326,18 @@ func (c *Cache[V]) removeExpired() {
 	now := c.now()
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	var evicted int64
 	for k, e := range c.items {
 		if now.After(e.expiresAt) {
 			if c.onEvict != nil {
 				c.onEvict(k, e.value)
 			}
 			delete(c.items, k)
+			evicted++
 		}
+	}
+	if evicted > 0 {
+		c.totalEvictions.Add(evicted)
 	}
 }
 
@@ -318,6 +358,7 @@ func (c *Cache[V]) evictLRU() {
 
 	if !first {
 		c.deleteLocked(oldestKey)
+		c.totalEvictions.Add(1)
 	}
 }
 
