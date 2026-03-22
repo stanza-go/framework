@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 	"time"
 )
 
@@ -34,6 +35,10 @@ type Client struct {
 	from       string
 	endpoint   string
 	httpClient *http.Client
+
+	// Atomic counters for observability.
+	totalSent   atomic.Int64
+	totalErrors atomic.Int64
 }
 
 // Message represents an email to be sent.
@@ -168,16 +173,19 @@ func (c *Client) Send(ctx context.Context, msg Message) (SendResult, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.totalErrors.Add(1)
 		return SendResult{}, fmt.Errorf("email: send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
+		c.totalErrors.Add(1)
 		return SendResult{}, fmt.Errorf("email: read response: %w", err)
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		c.totalErrors.Add(1)
 		return SendResult{}, &APIError{
 			StatusCode: resp.StatusCode,
 			Body:       string(respBody),
@@ -186,9 +194,11 @@ func (c *Client) Send(ctx context.Context, msg Message) (SendResult, error) {
 
 	var result SendResult
 	if err := json.Unmarshal(respBody, &result); err != nil {
+		c.totalErrors.Add(1)
 		return SendResult{}, fmt.Errorf("email: decode response: %w", err)
 	}
 
+	c.totalSent.Add(1)
 	return result, nil
 }
 
@@ -197,6 +207,25 @@ func (c *Client) Send(ctx context.Context, msg Message) (SendResult, error) {
 // development).
 func (c *Client) Configured() bool {
 	return c.apiKey != ""
+}
+
+// EmailStats holds a snapshot of cumulative email delivery counters.
+type EmailStats struct {
+	// Sent is the total number of emails successfully delivered to the API.
+	Sent int64 `json:"sent"`
+
+	// Errors is the total number of failed send attempts (transport errors,
+	// non-2xx responses, or decode failures).
+	Errors int64 `json:"errors"`
+}
+
+// Stats returns a snapshot of cumulative email counters. All counters
+// are read atomically and are safe to call from any goroutine.
+func (c *Client) Stats() EmailStats {
+	return EmailStats{
+		Sent:   c.totalSent.Load(),
+		Errors: c.totalErrors.Load(),
+	}
 }
 
 // resendPayload is the JSON body sent to the Resend API.

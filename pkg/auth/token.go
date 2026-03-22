@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -26,6 +27,11 @@ type Auth struct {
 	cookiePath      string
 	authCookiePath  string
 	secureCookies   bool
+
+	// Atomic counters for observability.
+	totalIssued   atomic.Int64
+	totalAccepted atomic.Int64
+	totalRejected atomic.Int64
 }
 
 // Option configures an Auth instance.
@@ -93,13 +99,23 @@ func (a *Auth) IssueAccessToken(uid string, scopes []string) (string, error) {
 		IssuedAt:  now.Unix(),
 		ExpiresAt: now.Add(a.accessTokenTTL).Unix(),
 	}
-	return CreateJWT(a.signingKey, claims)
+	token, err := CreateJWT(a.signingKey, claims)
+	if err == nil {
+		a.totalIssued.Add(1)
+	}
+	return token, err
 }
 
 // ValidateAccessToken verifies a JWT access token string and returns
 // its claims. Returns ErrInvalidToken or ErrTokenExpired on failure.
 func (a *Auth) ValidateAccessToken(token string) (Claims, error) {
-	return ValidateJWT(a.signingKey, token)
+	claims, err := ValidateJWT(a.signingKey, token)
+	if err != nil {
+		a.totalRejected.Add(1)
+	} else {
+		a.totalAccepted.Add(1)
+	}
+	return claims, err
 }
 
 // GenerateRefreshToken creates a cryptographically random opaque token
@@ -129,4 +145,27 @@ func (a *Auth) RefreshTokenTTL() time.Duration {
 // AccessTokenTTL returns the configured access token lifetime.
 func (a *Auth) AccessTokenTTL() time.Duration {
 	return a.accessTokenTTL
+}
+
+// AuthStats holds a snapshot of cumulative auth operation counters.
+type AuthStats struct {
+	// Issued is the total number of access tokens successfully created.
+	Issued int64 `json:"issued"`
+
+	// Accepted is the total number of tokens that passed validation.
+	Accepted int64 `json:"accepted"`
+
+	// Rejected is the total number of tokens that failed validation
+	// (expired, malformed, or invalid signature).
+	Rejected int64 `json:"rejected"`
+}
+
+// Stats returns a snapshot of cumulative auth counters. All counters
+// are read atomically and are safe to call from any goroutine.
+func (a *Auth) Stats() AuthStats {
+	return AuthStats{
+		Issued:   a.totalIssued.Load(),
+		Accepted: a.totalAccepted.Load(),
+		Rejected: a.totalRejected.Load(),
+	}
 }
