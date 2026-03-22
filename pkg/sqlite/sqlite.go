@@ -53,10 +53,11 @@ const (
 
 // DB is a SQLite database connection with read/write separation. Write
 // operations (Exec, transactions) use a dedicated write connection,
-// while read operations (Query, QueryRow) use a separate read
-// connection. This lets reads proceed concurrently with writes in WAL
-// mode — HTTP reads are not blocked by cron jobs or queue workers
-// writing to the database.
+// while read operations (Query, QueryRow) use a pool of read
+// connections. This lets multiple reads proceed concurrently with each
+// other and with writes in WAL mode — HTTP reads are not blocked by
+// cron jobs or queue workers writing to the database, and concurrent
+// HTTP requests can read simultaneously.
 //
 // For in-memory databases (:memory:), a single connection is used
 // because each :memory: connection creates a separate database.
@@ -68,10 +69,9 @@ const (
 //	    OnStop:  db.Stop,
 //	})
 type DB struct {
-	mu             sync.Mutex // protects write connection
-	db             *C.sqlite3 // write connection
-	readMu         sync.Mutex // protects read connection
-	readDB         *C.sqlite3 // read connection (nil for :memory:)
+	mu             sync.Mutex      // protects write connection
+	db             *C.sqlite3      // write connection
+	readPool       chan *C.sqlite3  // pool of read connections (nil for :memory:)
 	path           string
 	opts           []Option
 	migrations     []Migration
@@ -85,6 +85,7 @@ type Option func(*dbConfig)
 
 type dbConfig struct {
 	busyTimeout   int // milliseconds
+	readPoolSize  int // number of read connections
 	pragmas       []string
 	logger        *log.Logger
 	slowThreshold time.Duration
@@ -97,6 +98,17 @@ type dbConfig struct {
 func WithBusyTimeout(ms int) Option {
 	return func(c *dbConfig) {
 		c.busyTimeout = ms
+	}
+}
+
+// WithReadPoolSize sets the number of read connections in the pool.
+// The default is 4. More connections allow more concurrent reads,
+// which helps when multiple HTTP requests query the database
+// simultaneously. Only applies to file-backed databases — in-memory
+// databases always use a single connection.
+func WithReadPoolSize(n int) Option {
+	return func(c *dbConfig) {
+		c.readPoolSize = n
 	}
 }
 
@@ -138,12 +150,11 @@ func New(path string, opts ...Option) *DB {
 }
 
 // Start opens the database connections and configures them with WAL
-// mode, busy timeout, and any additional pragmas. Two connections are
-// opened: one for writes (Exec, transactions) and one for reads
-// (Query, QueryRow). This allows reads to proceed concurrently with
-// writes in WAL mode. For in-memory databases, only a single
-// connection is used because each :memory: open creates a separate
-// database.
+// mode, busy timeout, and any additional pragmas. One write connection
+// and a pool of read connections are opened. The pool allows multiple
+// reads to proceed concurrently with each other and with writes in
+// WAL mode. For in-memory databases, only a single connection is used
+// because each :memory: open creates a separate database.
 func (db *DB) Start(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
@@ -152,9 +163,12 @@ func (db *DB) Start(ctx context.Context) error {
 		return fmt.Errorf("sqlite: already open")
 	}
 
-	cfg := dbConfig{busyTimeout: 5000}
+	cfg := dbConfig{busyTimeout: 5000, readPoolSize: 4}
 	for _, opt := range db.opts {
 		opt(&cfg)
+	}
+	if cfg.readPoolSize < 1 {
+		cfg.readPoolSize = 1
 	}
 
 	db.logger = cfg.logger
@@ -170,17 +184,26 @@ func (db *DB) Start(ctx context.Context) error {
 	}
 	db.db = writeConn
 
-	// Open a separate read connection for non-memory databases.
+	// Open a pool of read connections for non-memory databases.
 	// In-memory databases create a new database per connection, so
 	// read and write must share the same connection.
 	if db.path != ":memory:" && db.path != "" {
-		readConn, err := db.openConn(cfg)
-		if err != nil {
-			C._close(db.db)
-			db.db = nil
-			return fmt.Errorf("sqlite: open read connection: %w", err)
+		pool := make(chan *C.sqlite3, cfg.readPoolSize)
+		for range cfg.readPoolSize {
+			rc, err := db.openConn(cfg)
+			if err != nil {
+				// Close any already-opened read connections.
+				close(pool)
+				for conn := range pool {
+					C._close(conn)
+				}
+				C._close(db.db)
+				db.db = nil
+				return fmt.Errorf("sqlite: open read connection: %w", err)
+			}
+			pool <- rc
 		}
-		db.readDB = readConn
+		db.readPool = pool
 	}
 
 	return nil
@@ -239,20 +262,21 @@ func (db *DB) openConn(cfg dbConfig) (*C.sqlite3, error) {
 	return conn, nil
 }
 
-// Stop closes both database connections gracefully. The read
-// connection is closed first, then the write connection. The context
+// Stop closes all database connections gracefully. Read pool
+// connections are closed first, then the write connection. The context
 // is accepted for lifecycle compatibility but is not used for
 // cancellation.
 func (db *DB) Stop(ctx context.Context) error {
-	// Close the read connection first.
-	if db.readDB != nil {
-		db.readMu.Lock()
-		rc := C._close(db.readDB)
-		db.readDB = nil
-		db.readMu.Unlock()
-		if rc != resultOK {
-			return fmt.Errorf("sqlite: close read connection: code %d", rc)
+	// Drain and close all read pool connections.
+	if db.readPool != nil {
+		close(db.readPool)
+		for conn := range db.readPool {
+			rc := C._close(conn)
+			if rc != resultOK {
+				return fmt.Errorf("sqlite: close read connection: code %d", rc)
+			}
 		}
+		db.readPool = nil
 	}
 
 	db.mu.Lock()
@@ -310,22 +334,55 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 	return result, nil
 }
 
-// Query executes a SQL statement that returns rows (SELECT). Uses the
-// read connection when available (file-backed databases), falling back
-// to the write connection for in-memory databases. Use args to bind
-// parameters using positional placeholders (?). The caller must call
-// Rows.Close when done iterating.
+// Query executes a SQL statement that returns rows (SELECT). Uses a
+// connection from the read pool when available (file-backed
+// databases), falling back to the write connection for in-memory
+// databases. Use args to bind parameters using positional placeholders
+// (?). The caller must call Rows.Close when done iterating — this
+// returns the connection to the pool.
 func (db *DB) Query(sql string, args ...any) (*Rows, error) {
-	// Use read connection if available, otherwise fall back to write.
-	if db.readDB != nil {
-		return db.queryOn(&db.readMu, db.readDB, sql, args)
+	// Use a read pool connection if available, otherwise fall back
+	// to the write connection with its mutex.
+	if db.readPool != nil {
+		return db.queryPool(sql, args)
 	}
-	return db.queryOn(&db.mu, db.db, sql, args)
+	return db.queryMu(&db.mu, db.db, sql, args)
 }
 
-// queryOn executes a query on the given connection, holding mu for the
+// queryPool takes a connection from the read pool, executes the query,
+// and returns Rows that will return the connection on Close.
+func (db *DB) queryPool(sql string, args []any) (*Rows, error) {
+	start := time.Now()
+
+	conn := <-db.readPool
+
+	stmt, err := db.prepare(conn, sql)
+	if err != nil {
+		db.logQuery(sql, time.Since(start), err)
+		db.readPool <- conn
+		return nil, err
+	}
+
+	if err := db.bind(conn, stmt, args); err != nil {
+		C._finalize(stmt)
+		db.logQuery(sql, time.Since(start), err)
+		db.readPool <- conn
+		return nil, err
+	}
+
+	return &Rows{
+		db:    db,
+		conn:  conn,
+		pool:  db.readPool,
+		stmt:  stmt,
+		start: start,
+		sql:   sql,
+	}, nil
+}
+
+// queryMu executes a query on the given connection, holding mu for the
 // lifetime of the returned Rows.
-func (db *DB) queryOn(mu *sync.Mutex, conn *C.sqlite3, sql string, args []any) (*Rows, error) {
+func (db *DB) queryMu(mu *sync.Mutex, conn *C.sqlite3, sql string, args []any) (*Rows, error) {
 	start := time.Now()
 
 	mu.Lock()
@@ -507,17 +564,19 @@ type Result struct {
 	RowsAffected int64
 }
 
-// Rows iterates over query results. When created outside a transaction,
-// it holds a mutex (read or write) for the duration of iteration, so
-// callers should close rows promptly. When created inside a
-// transaction, mu is nil — the transaction owns the write mutex.
+// Rows iterates over query results. When created from the read pool,
+// it holds a connection that is returned to the pool on Close. When
+// created from the write connection (in-memory databases), it holds a
+// mutex that is unlocked on Close. When created inside a transaction,
+// both pool and mu are nil — the transaction owns the write mutex.
 //
-// Fields are ordered to minimize padding: pointers and slices first,
+// Fields are ordered to minimize padding: pointers and channels first,
 // then the error interface, then bools packed together at the end.
 type Rows struct {
 	db      *DB
-	conn    *C.sqlite3    // connection this query runs on (for error messages)
-	mu      *sync.Mutex   // mutex to unlock on Close (nil if tx-owned)
+	conn    *C.sqlite3         // connection this query runs on (for error messages)
+	pool    chan *C.sqlite3     // read pool to return conn to on Close (nil if not pooled)
+	mu      *sync.Mutex        // mutex to unlock on Close (nil if pooled or tx-owned)
 	stmt    *C.sqlite3_stmt
 	start   time.Time
 	cols    []string
@@ -636,10 +695,12 @@ func (r *Rows) Columns() []string {
 	return r.cols
 }
 
-// Close releases the prepared statement. When rows were created outside
-// a transaction, Close also unlocks the held mutex (read or write).
-// When rows were created inside a transaction, the transaction retains
-// the write mutex. It is safe to call Close multiple times.
+// Close releases the prepared statement. When rows were created from
+// the read pool, Close returns the connection to the pool. When rows
+// were created from the write connection (in-memory databases), Close
+// unlocks the held mutex. When rows were created inside a transaction,
+// the transaction retains the write mutex. It is safe to call Close
+// multiple times.
 func (r *Rows) Close() error {
 	if r.closed {
 		return nil
@@ -647,7 +708,9 @@ func (r *Rows) Close() error {
 	r.closed = true
 	C._finalize(r.stmt)
 	r.db.logQuery(r.sql, time.Since(r.start), r.err)
-	if r.mu != nil {
+	if r.pool != nil {
+		r.pool <- r.conn
+	} else if r.mu != nil {
 		r.mu.Unlock()
 	}
 	return nil
