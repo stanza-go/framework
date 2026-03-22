@@ -53,6 +53,26 @@ func Max(column string) string { return "MAX(" + column + ")" }
 //	// → SELECT status, SUM(amount) AS total FROM orders GROUP BY status
 func As(expr, alias string) string { return expr + " AS " + alias }
 
+// Coalesce returns a COALESCE(column, fallback) expression. The fallback
+// is a raw SQL literal — use "''" for an empty string, "0" for zero, etc.
+//
+//	sqlite.Select("id", sqlite.Coalesce("deleted_at", "''")).From("users").Build()
+//	// → SELECT id, COALESCE(deleted_at, '') FROM users
+func Coalesce(column, fallback string) string {
+	return "COALESCE(" + column + ", " + fallback + ")"
+}
+
+// CoalesceEmpty returns a COALESCE(column, '') expression that converts
+// NULL to an empty string. This is the most common COALESCE pattern when
+// scanning nullable TEXT columns into Go strings.
+//
+//	sqlite.Select("id", sqlite.CoalesceEmpty("read_at"), "created_at").
+//		From("notifications").Build()
+//	// → SELECT id, COALESCE(read_at, ''), created_at FROM notifications
+func CoalesceEmpty(column string) string {
+	return Coalesce(column, "''")
+}
+
 // whereClause holds a condition fragment and its bound arguments.
 type whereClause struct {
 	cond string
