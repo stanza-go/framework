@@ -80,6 +80,19 @@ func RequestLogger(logger *log.Logger) Middleware {
 		return HandlerFunc(func(w ResponseWriter, r *Request) {
 			start := time.Now()
 
+			// Create a request-scoped child logger. If the RequestID
+			// middleware ran earlier, the child includes request_id in
+			// every entry — both the per-request summary logged below
+			// and any handler-level log calls via log.FromContext.
+			reqLogger := logger
+			if id := GetRequestID(r); id != "" {
+				reqLogger = logger.With(log.String("request_id", id))
+			}
+
+			// Store the request-scoped logger in context so handlers
+			// can retrieve it with log.FromContext(r.Context()).
+			r = r.WithContext(log.NewContext(r.Context(), reqLogger))
+
 			rec := &responseRecorder{
 				ResponseWriter: w,
 				status:         StatusOK,
@@ -87,9 +100,7 @@ func RequestLogger(logger *log.Logger) Middleware {
 
 			next.ServeHTTP(rec, r)
 
-			// Pre-allocate with capacity 7 to avoid growth when request_id
-			// is present (the common case with RequestID middleware).
-			fields := make([]log.Field, 6, 7)
+			fields := make([]log.Field, 6)
 			fields[0] = log.String("method", r.Method)
 			fields[1] = log.String("path", r.URL.Path)
 			fields[2] = log.Int("status", rec.status)
@@ -97,16 +108,10 @@ func RequestLogger(logger *log.Logger) Middleware {
 			fields[4] = log.Int64("bytes", rec.written)
 			fields[5] = log.String("remote", r.RemoteAddr)
 
-			// Include request ID if the RequestID middleware ran earlier
-			// in the chain.
-			if id := GetRequestID(r); id != "" {
-				fields = append(fields, log.String("request_id", id))
-			}
-
 			if rec.status >= 500 {
-				logger.Error("http request", fields...)
+				reqLogger.Error("http request", fields...)
 			} else {
-				logger.Info("http request", fields...)
+				reqLogger.Info("http request", fields...)
 			}
 		})
 	}
