@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unsafe"
 
@@ -72,6 +73,9 @@ type DB struct {
 	mu             sync.Mutex      // protects write connection
 	db             *C.sqlite3      // write connection
 	readPool       chan *C.sqlite3  // pool of read connections (nil for :memory:)
+	poolDone       chan struct{}    // closed on Stop to unblock pool waiters
+	poolWg         sync.WaitGroup  // tracks connections checked out from pool
+	poolStopping   atomic.Bool     // true after poolDone is closed
 	path           string
 	opts           []Option
 	migrations     []Migration
@@ -204,6 +208,7 @@ func (db *DB) Start(ctx context.Context) error {
 			pool <- rc
 		}
 		db.readPool = pool
+		db.poolDone = make(chan struct{})
 	}
 
 	return nil
@@ -262,13 +267,28 @@ func (db *DB) openConn(cfg dbConfig) (*C.sqlite3, error) {
 	return conn, nil
 }
 
-// Stop closes all database connections gracefully. Read pool
-// connections are closed first, then the write connection. The context
-// is accepted for lifecycle compatibility but is not used for
-// cancellation.
+// Stop closes all database connections gracefully. It signals pool
+// operations to stop, waits for all checked-out connections to be
+// returned (or closed directly), drains the pool channel, then closes
+// the write connection. The context is accepted for lifecycle
+// compatibility but is not used for cancellation.
 func (db *DB) Stop(ctx context.Context) error {
-	// Drain and close all read pool connections.
 	if db.readPool != nil {
+		// Signal all pool operations to stop. This unblocks any
+		// goroutines waiting for a connection in queryPool.
+		close(db.poolDone)
+
+		// Mark the pool as stopping so returnToPool closes
+		// connections directly instead of sending to the channel.
+		db.poolStopping.Store(true)
+
+		// Wait for all checked-out connections to be returned or
+		// closed directly by returnToPool.
+		db.poolWg.Wait()
+
+		// All checked-out connections are accounted for. Drain any
+		// connections remaining in the channel (those that were idle
+		// or returned before poolStopping was set).
 		close(db.readPool)
 		for conn := range db.readPool {
 			rc := C._close(conn)
@@ -350,23 +370,38 @@ func (db *DB) Query(sql string, args ...any) (*Rows, error) {
 }
 
 // queryPool takes a connection from the read pool, executes the query,
-// and returns Rows that will return the connection on Close.
+// and returns Rows that will return the connection on Close. The
+// WaitGroup is incremented before waiting so that Stop can wait for
+// all checked-out connections to be returned. If the database is
+// shutting down (poolDone closed), the select unblocks immediately
+// and returns an error.
 func (db *DB) queryPool(sql string, args []any) (*Rows, error) {
 	start := time.Now()
 
-	conn := <-db.readPool
+	// Increment before select so Stop's poolWg.Wait cannot return
+	// while a goroutine is between receiving a connection and
+	// tracking it.
+	db.poolWg.Add(1)
+
+	var conn *C.sqlite3
+	select {
+	case conn = <-db.readPool:
+	case <-db.poolDone:
+		db.poolWg.Done()
+		return nil, fmt.Errorf("sqlite: database is shutting down")
+	}
 
 	stmt, err := db.prepare(conn, sql)
 	if err != nil {
 		db.logQuery(sql, time.Since(start), err)
-		db.readPool <- conn
+		db.returnToPool(conn)
 		return nil, err
 	}
 
 	if err := db.bind(conn, stmt, args); err != nil {
 		C._finalize(stmt)
 		db.logQuery(sql, time.Since(start), err)
-		db.readPool <- conn
+		db.returnToPool(conn)
 		return nil, err
 	}
 
@@ -378,6 +413,24 @@ func (db *DB) queryPool(sql string, args []any) (*Rows, error) {
 		start: start,
 		sql:   sql,
 	}, nil
+}
+
+// returnToPool returns a read connection to the pool, or closes it
+// directly if the database is shutting down. Must be called exactly
+// once per connection checked out from the pool.
+func (db *DB) returnToPool(conn *C.sqlite3) {
+	if db.poolStopping.Load() {
+		// Pool is draining — close the connection directly instead
+		// of sending to a potentially closed channel.
+		C._close(conn)
+	} else {
+		select {
+		case db.readPool <- conn:
+		case <-db.poolDone:
+			C._close(conn)
+		}
+	}
+	db.poolWg.Done()
 }
 
 // queryMu executes a query on the given connection, holding mu for the
@@ -696,11 +749,11 @@ func (r *Rows) Columns() []string {
 }
 
 // Close releases the prepared statement. When rows were created from
-// the read pool, Close returns the connection to the pool. When rows
-// were created from the write connection (in-memory databases), Close
-// unlocks the held mutex. When rows were created inside a transaction,
-// the transaction retains the write mutex. It is safe to call Close
-// multiple times.
+// the read pool, Close returns the connection via returnToPool (which
+// is safe to call during shutdown). When rows were created from the
+// write connection (in-memory databases), Close unlocks the held
+// mutex. When rows were created inside a transaction, the transaction
+// retains the write mutex. It is safe to call Close multiple times.
 func (r *Rows) Close() error {
 	if r.closed {
 		return nil
@@ -709,7 +762,7 @@ func (r *Rows) Close() error {
 	C._finalize(r.stmt)
 	r.db.logQuery(r.sql, time.Since(r.start), r.err)
 	if r.pool != nil {
-		r.pool <- r.conn
+		r.db.returnToPool(r.conn)
 	} else if r.mu != nil {
 		r.mu.Unlock()
 	}
