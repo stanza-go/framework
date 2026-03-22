@@ -71,6 +71,12 @@ type DBStats struct {
 	// PoolWaitTime is the cumulative time spent waiting for a free
 	// connection from the read pool.
 	PoolWaitTime time.Duration `json:"pool_wait_time"`
+	// FileSize is the size of the main database file in bytes. Zero
+	// for in-memory databases or if the file cannot be stat'd.
+	FileSize int64 `json:"file_size"`
+	// WALSize is the size of the WAL (write-ahead log) file in bytes.
+	// Zero when there is no WAL file or for in-memory databases.
+	WALSize int64 `json:"wal_size"`
 }
 
 // DB is a SQLite database connection with read/write separation. Write
@@ -538,9 +544,9 @@ func (db *DB) Path() string {
 // after the call returns.
 func (db *DB) Stats() DBStats {
 	s := DBStats{
-		TotalReads:  db.totalReads.Load(),
-		TotalWrites: db.totalWrites.Load(),
-		PoolWaits:   db.poolWaits.Load(),
+		TotalReads:   db.totalReads.Load(),
+		TotalWrites:  db.totalWrites.Load(),
+		PoolWaits:    db.poolWaits.Load(),
 		PoolWaitTime: time.Duration(db.poolWaitNs.Load()),
 	}
 	if db.readPool != nil {
@@ -548,7 +554,24 @@ func (db *DB) Stats() DBStats {
 		s.ReadPoolAvailable = len(db.readPool)
 		s.ReadPoolInUse = s.ReadPoolSize - s.ReadPoolAvailable
 	}
+	if db.path != "" && db.path != ":memory:" {
+		if info, err := os.Stat(db.path); err == nil {
+			s.FileSize = info.Size()
+		}
+		if info, err := os.Stat(db.path + "-wal"); err == nil {
+			s.WALSize = info.Size()
+		}
+	}
 	return s
+}
+
+// Optimize runs PRAGMA optimize, which analyzes tables that the query
+// planner has identified as needing updated statistics. Call this before
+// closing a long-running database connection — it keeps the query
+// planner accurate with minimal overhead (typically a few milliseconds).
+func (db *DB) Optimize() error {
+	_, err := db.Exec("PRAGMA optimize")
+	return err
 }
 
 // Backup creates a complete, consistent copy of the database at destPath
