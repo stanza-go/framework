@@ -75,6 +75,12 @@ func Compress(cfg CompressConfig) Middleware {
 
 	return func(next Handler) Handler {
 		return HandlerFunc(func(w ResponseWriter, r *Request) {
+			// Always set Vary: Accept-Encoding so shared caches serve
+			// the correct variant (compressed or not) to each client.
+			// Use Add (not Set) to preserve existing Vary values from
+			// other middleware such as CORS's Vary: Origin.
+			w.Header().Add("Vary", "Accept-Encoding")
+
 			if !acceptsGzip(r) {
 				next.ServeHTTP(w, r)
 				return
@@ -182,7 +188,6 @@ func (cw *compressWriter) decide() {
 
 	cw.compressed = true
 	cw.Header().Set("Content-Encoding", "gzip")
-	cw.Header().Set("Vary", "Accept-Encoding")
 	cw.Header().Del("Content-Length")
 }
 

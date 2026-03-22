@@ -278,10 +278,10 @@ type CORSConfig struct {
 // headers and a 204 status, and adds CORS headers to all other
 // cross-origin requests.
 //
-// For development with Vite (admin on :23705, API on :23710):
+// For development with Vite (admin on :23706, API on :23710):
 //
 //	r.Use(http.CORS(http.CORSConfig{
-//	    AllowOrigins:     []string{"http://localhost:23705"},
+//	    AllowOrigins:     []string{"http://localhost:23706"},
 //	    AllowCredentials: true,
 //	}))
 //
@@ -323,6 +323,15 @@ func CORS(cfg CORSConfig) Middleware {
 				return
 			}
 
+			// When using specific origins (not wildcard "*"), always set
+			// Vary: Origin so shared caches vary responses by origin.
+			// This must be set even for disallowed origins — otherwise a
+			// cache could store a non-CORS response and serve it later
+			// when an allowed origin makes the same request.
+			if !allowAll && len(origins) > 0 {
+				w.Header().Add("Vary", "Origin")
+			}
+
 			if !allowAll && !origins[origin] {
 				next.ServeHTTP(w, r)
 				return
@@ -332,7 +341,6 @@ func CORS(cfg CORSConfig) Middleware {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 			} else {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Add("Vary", "Origin")
 			}
 
 			if cfg.AllowCredentials {
