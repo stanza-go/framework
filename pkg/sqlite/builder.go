@@ -1,6 +1,22 @@
 package sqlite
 
-import "strings"
+import (
+	"strings"
+)
+
+// EscapeLike escapes the special characters %, _, and \ in s so that it
+// can be used as a literal pattern in a LIKE clause with ESCAPE '\'.
+// The caller is responsible for wrapping the result with % for prefix,
+// suffix, or contains matching:
+//
+//	like := "%" + sqlite.EscapeLike(search) + "%"
+//	q.Where("name LIKE ? ESCAPE '\\'", like)
+func EscapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
+}
 
 // whereClause holds a condition fragment and its bound arguments.
 type whereClause struct {
@@ -278,10 +294,12 @@ func (b *CountBuilder) Build() (string, []any) {
 // InsertBuilder builds INSERT queries. Use Set to add column-value pairs.
 // This allows conditional column inclusion by chaining Set calls.
 type InsertBuilder struct {
-	table    string
-	columns  []string
-	values   []any
-	orIgnore bool
+	table           string
+	columns         []string
+	values          []any
+	orIgnore        bool
+	conflictColumns []string
+	updateColumns   []string
 }
 
 // Insert starts building an INSERT query for the given table.
@@ -299,6 +317,29 @@ func (b *InsertBuilder) Set(column string, value any) *InsertBuilder {
 // OrIgnore makes the statement INSERT OR IGNORE (skips on conflict).
 func (b *InsertBuilder) OrIgnore() *InsertBuilder {
 	b.orIgnore = true
+	return b
+}
+
+// OnConflict adds an ON CONFLICT ... DO UPDATE SET clause for upsert
+// behavior. conflictColumns are the unique columns that trigger the
+// conflict (e.g., "user_id", "key"). updateColumns are the columns to
+// update from the excluded row when a conflict occurs. The generated SQL
+// uses "excluded.<col>" to reference the values from the attempted insert:
+//
+//	sqlite.Insert("user_settings").
+//		Set("user_id", uid).
+//		Set("key", k).
+//		Set("value", v).
+//		Set("updated_at", now).
+//		OnConflict([]string{"user_id", "key"}, []string{"value", "updated_at"})
+//
+// Produces:
+//
+//	INSERT INTO user_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?)
+//	ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+func (b *InsertBuilder) OnConflict(conflictColumns, updateColumns []string) *InsertBuilder {
+	b.conflictColumns = conflictColumns
+	b.updateColumns = updateColumns
 	return b
 }
 
@@ -322,6 +363,20 @@ func (b *InsertBuilder) Build() (string, []any) {
 		sb.WriteByte('?')
 	}
 	sb.WriteByte(')')
+
+	if len(b.conflictColumns) > 0 && len(b.updateColumns) > 0 {
+		sb.WriteString(" ON CONFLICT(")
+		sb.WriteString(strings.Join(b.conflictColumns, ", "))
+		sb.WriteString(") DO UPDATE SET ")
+		for i, col := range b.updateColumns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(col)
+			sb.WriteString(" = excluded.")
+			sb.WriteString(col)
+		}
+	}
 
 	return sb.String(), b.values
 }
