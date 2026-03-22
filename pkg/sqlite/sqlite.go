@@ -366,7 +366,7 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 
 	rc := C._step(stmt)
 	if rc != resultDone && rc != resultRow {
-		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(db.db)))
+		err := dbError(db.db, "sqlite: exec")
 		db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
@@ -581,6 +581,19 @@ func (db *DB) logQuery(sql string, dur time.Duration, err error) {
 	db.logger.Debug("query", fields...)
 }
 
+// dbError creates an *Error from the current error state of conn.
+// The prefix is prepended to the SQLite error message (e.g.,
+// "sqlite: exec" produces "sqlite: exec: UNIQUE constraint failed").
+func dbError(conn *C.sqlite3, prefix string) *Error {
+	code := int(C._errcode(conn))
+	extCode := int(C._extended_errcode(conn))
+	msg := C.GoString(C._errmsg(conn))
+	if prefix != "" {
+		msg = prefix + ": " + msg
+	}
+	return &Error{Code: code, ExtendedCode: extCode, Message: msg}
+}
+
 // prepare compiles a SQL statement on the given connection. The caller
 // must hold the mutex that protects conn.
 func (db *DB) prepare(conn *C.sqlite3, sql string) (*C.sqlite3_stmt, error) {
@@ -590,7 +603,7 @@ func (db *DB) prepare(conn *C.sqlite3, sql string) (*C.sqlite3_stmt, error) {
 	var stmt *C.sqlite3_stmt
 	rc := C._prepare(conn, csql, C.int(len(sql)), &stmt, nil)
 	if rc != resultOK {
-		return nil, fmt.Errorf("sqlite: prepare: %s", C.GoString(C._errmsg(conn)))
+		return nil, dbError(conn, "sqlite: prepare")
 	}
 	if stmt == nil {
 		return nil, fmt.Errorf("sqlite: prepare: empty statement")
@@ -639,7 +652,7 @@ func (db *DB) bind(conn *C.sqlite3, stmt *C.sqlite3_stmt, args []any) error {
 		}
 
 		if rc != resultOK {
-			return fmt.Errorf("sqlite: bind %d: %s", i, C.GoString(C._errmsg(conn)))
+			return dbError(conn, fmt.Sprintf("sqlite: bind %d", i))
 		}
 	}
 	return nil
@@ -656,7 +669,11 @@ func (db *DB) execOnConn(conn *C.sqlite3, sql string) error {
 	if rc != resultOK {
 		msg := C.GoString(errmsg)
 		C.free(unsafe.Pointer(errmsg))
-		return fmt.Errorf("%s", msg)
+		return &Error{
+			Code:         int(C._errcode(conn)),
+			ExtendedCode: int(C._extended_errcode(conn)),
+			Message:      msg,
+		}
 	}
 	return nil
 }
@@ -710,7 +727,7 @@ func (r *Rows) Next() bool {
 	}
 	r.hasRow = false
 	if rc != resultDone {
-		r.err = fmt.Errorf("sqlite: step: %s", C.GoString(C._errmsg(r.conn)))
+		r.err = dbError(r.conn, "sqlite: step")
 	}
 	return false
 }

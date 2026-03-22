@@ -96,6 +96,14 @@ static inline const char *_errmsg(sqlite3 *db) {
 	return sqlite3_errmsg(db);
 }
 
+static inline int _errcode(sqlite3 *db) {
+	return sqlite3_errcode(db);
+}
+
+static inline int _extended_errcode(sqlite3 *db) {
+	return sqlite3_extended_errcode(db);
+}
+
 static inline int _changes(sqlite3 *db) {
 	return sqlite3_changes(db);
 }

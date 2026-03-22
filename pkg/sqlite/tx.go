@@ -88,7 +88,7 @@ func (tx *Tx) Exec(sql string, args ...any) (Result, error) {
 
 	rc := C._step(stmt)
 	if rc != resultDone && rc != resultRow {
-		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(conn)))
+		err := dbError(conn, "sqlite: exec")
 		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
@@ -176,7 +176,7 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 
 		rc := C._step(stmt)
 		if rc != resultDone && rc != resultRow {
-			err := fmt.Errorf("sqlite: exec batch item %d: %s", i, C.GoString(C._errmsg(conn)))
+			err := dbError(conn, fmt.Sprintf("sqlite: exec batch item %d", i))
 			tx.db.logQuery(sql, time.Since(start), err)
 			return err
 		}
