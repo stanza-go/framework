@@ -36,6 +36,7 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,6 +56,12 @@ type Client struct {
 	retryBaseDelay time.Duration
 	retryMaxDelay  time.Duration
 	now            func() time.Time
+
+	totalSends     atomic.Int64
+	totalSuccesses atomic.Int64
+	totalFailures  atomic.Int64
+	totalRetries   atomic.Int64
+	totalErrors    atomic.Int64
 }
 
 // Delivery represents a single webhook delivery request.
@@ -167,11 +174,14 @@ func (c *Client) Send(ctx context.Context, d *Delivery) (*Result, error) {
 		return nil, ErrNoURL
 	}
 
+	c.totalSends.Add(1)
+
 	deliveryID := generateID()
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Payload))
 	if err != nil {
+		c.totalErrors.Add(1)
 		return nil, fmt.Errorf("webhook: create request: %w", err)
 	}
 
@@ -191,13 +201,21 @@ func (c *Client) Send(ctx context.Context, d *Delivery) (*Result, error) {
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.totalErrors.Add(1)
 		return nil, fmt.Errorf("webhook: send request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 	if err != nil {
+		c.totalErrors.Add(1)
 		return nil, fmt.Errorf("webhook: read response: %w", err)
+	}
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		c.totalSuccesses.Add(1)
+	} else {
+		c.totalFailures.Add(1)
 	}
 
 	return &Result{
@@ -216,6 +234,8 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 		return nil, ErrNoURL
 	}
 
+	c.totalSends.Add(1)
+
 	deliveryID := generateID()
 	timestamp := strconv.FormatInt(c.now().Unix(), 10)
 
@@ -224,12 +244,14 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 
 	for attempt := 0; attempt <= c.maxRetries; attempt++ {
 		if attempt > 0 {
+			c.totalRetries.Add(1)
 			delay := c.retryBaseDelay * (1 << (attempt - 1))
 			if delay > c.retryMaxDelay {
 				delay = c.retryMaxDelay
 			}
 			select {
 			case <-ctx.Done():
+				c.totalErrors.Add(1)
 				return lastResult, ctx.Err()
 			case <-time.After(delay):
 			}
@@ -237,6 +259,7 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, d.URL, bytes.NewReader(d.Payload))
 		if err != nil {
+			c.totalErrors.Add(1)
 			return nil, fmt.Errorf("webhook: create request: %w", err)
 		}
 
@@ -275,15 +298,19 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 		}
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			c.totalSuccesses.Add(1)
 			return lastResult, nil
 		}
 
 		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			c.totalFailures.Add(1)
 			return lastResult, nil
 		}
 
 		lastErr = fmt.Errorf("webhook: server error (attempt %d): status %d", attempt+1, resp.StatusCode)
 	}
+
+	c.totalFailures.Add(1)
 
 	if lastResult != nil {
 		return lastResult, lastErr
@@ -313,6 +340,38 @@ func Sign(secret, id, timestamp string, body []byte) string {
 func Verify(secret, id, timestamp, signature string, body []byte) bool {
 	expected := Sign(secret, id, timestamp, body)
 	return hmac.Equal([]byte(expected), []byte(signature))
+}
+
+// ClientStats holds cumulative delivery counters for a webhook Client.
+type ClientStats struct {
+	// Sends is the total number of Send or SendWithRetry calls.
+	Sends int64 `json:"sends"`
+
+	// Successes is the total number of deliveries that received a 2xx response.
+	Successes int64 `json:"successes"`
+
+	// Failures is the total number of deliveries that received a non-2xx
+	// response (4xx or 5xx after all retries exhausted).
+	Failures int64 `json:"failures"`
+
+	// Retries is the total number of retry attempts (only from SendWithRetry).
+	Retries int64 `json:"retries"`
+
+	// Errors is the total number of network or request-building errors
+	// (DNS failures, timeouts, context cancellations).
+	Errors int64 `json:"errors"`
+}
+
+// Stats returns a snapshot of cumulative delivery counters. All counters
+// are read atomically and are safe to call concurrently.
+func (c *Client) Stats() ClientStats {
+	return ClientStats{
+		Sends:     c.totalSends.Load(),
+		Successes: c.totalSuccesses.Load(),
+		Failures:  c.totalFailures.Load(),
+		Retries:   c.totalRetries.Load(),
+		Errors:    c.totalErrors.Load(),
+	}
 }
 
 // generateID creates a random delivery ID in the format "whd_<hex>".
