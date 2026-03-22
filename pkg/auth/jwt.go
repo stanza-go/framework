@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -24,6 +25,13 @@ type Claims struct {
 // current time.
 func (c Claims) Valid() bool {
 	return time.Now().Unix() < c.ExpiresAt
+}
+
+// IntUID returns UID parsed as an int64. It returns 0 if UID is
+// empty or not a valid integer.
+func (c Claims) IntUID() int64 {
+	v, _ := strconv.ParseInt(c.UID, 10, 64)
+	return v
 }
 
 // HasScope reports whether the claims include the named scope.

@@ -115,6 +115,23 @@ func ReadJSONLimit(r *Request, v any, maxBytes int64) error {
 	return nil
 }
 
+// PathParamInt64 parses a path parameter as an int64. If the value is
+// missing or not a valid integer, it writes a 400 error response and
+// returns false. The caller should return immediately when false:
+//
+//	id, ok := http.PathParamInt64(w, r, "id")
+//	if !ok {
+//	    return
+//	}
+func PathParamInt64(w ResponseWriter, r *Request, name string) (int64, bool) {
+	v, err := strconv.ParseInt(r.PathValue(name), 10, 64)
+	if err != nil {
+		WriteError(w, StatusBadRequest, "invalid "+name)
+		return 0, false
+	}
+	return v, true
+}
+
 // CheckBulkIDs validates that an int64 ID slice is non-empty and does
 // not exceed maxCount. If invalid, it writes a 400 error response and
 // returns false. The caller should return immediately when false:
