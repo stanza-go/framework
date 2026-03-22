@@ -284,7 +284,7 @@ func (a *App) Run() error {
 	if err := a.Start(startCtx); err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), a.stopTimeout)
 		defer stopCancel()
-		a.Stop(stopCtx)
+		_ = a.Stop(stopCtx)
 		return err
 	}
 

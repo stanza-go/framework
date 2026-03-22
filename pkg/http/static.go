@@ -31,7 +31,7 @@ func Static(fsys fs.FS) Handler {
 		f, err := fsys.Open(p)
 		if err == nil {
 			stat, statErr := f.Stat()
-			f.Close()
+			_ = f.Close()
 			if statErr == nil && !stat.IsDir() {
 				nethttp.ServeFileFS(w, r, fsys, p)
 				return

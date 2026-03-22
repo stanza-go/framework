@@ -1,4 +1,4 @@
-.PHONY: test bench vet check
+.PHONY: test bench vet lint check
 
 test:
 	CGO_ENABLED=1 go test -race -count=1 ./pkg/...
@@ -9,4 +9,7 @@ bench:
 vet:
 	CGO_ENABLED=1 go vet ./...
 
-check: vet test
+lint:
+	CGO_ENABLED=1 golangci-lint run ./pkg/...
+
+check: vet lint test

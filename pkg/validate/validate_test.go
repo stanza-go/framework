@@ -197,7 +197,7 @@ func TestCheck(t *testing.T) {
 
 	fe = Check("expires_at", false, "must be in the future")
 	if fe == nil {
-		t.Error("expected error, got nil")
+		t.Fatal("expected error, got nil")
 	}
 	if fe.Message != "must be in the future" {
 		t.Errorf("got message %q, want %q", fe.Message, "must be in the future")

@@ -671,8 +671,9 @@ func TestServerGracefulShutdown(t *testing.T) {
 	}
 
 	// After stop, new connections should fail.
-	_, err = nethttp.Get("http://" + srv.Addr() + "/ok")
+	resp, err = nethttp.Get("http://" + srv.Addr() + "/ok")
 	if err == nil {
+		resp.Body.Close()
 		t.Error("expected error after stop")
 	}
 }
@@ -2904,7 +2905,7 @@ func TestETagDifferentContent(t *testing.T) {
 	r.Use(ETag(ETagConfig{}))
 	r.HandleFunc("GET /data", func(w ResponseWriter, req *Request) {
 		call++
-		w.Write([]byte(fmt.Sprintf("content-%d", call)))
+		fmt.Fprintf(w, "content-%d", call)
 	})
 
 	w1 := httptest.NewRecorder()

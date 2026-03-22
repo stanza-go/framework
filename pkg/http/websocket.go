@@ -148,7 +148,7 @@ func (u Upgrader) Upgrade(w ResponseWriter, r *Request) (*Conn, error) {
 	buf = append(buf, accept...)
 	buf = append(buf, "\r\n\r\n"...)
 	if _, err := conn.Write(buf); err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return nil, fmt.Errorf("websocket: write handshake: %w", err)
 	}
 

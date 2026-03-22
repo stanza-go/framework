@@ -197,8 +197,8 @@ func (s *Scheduler) Start(ctx context.Context) error {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	s.ctx = ctx
+	runCtx, cancel := context.WithCancel(context.Background())
+	s.ctx = runCtx
 	s.cancel = cancel
 	s.mu.Unlock()
 
@@ -206,7 +206,7 @@ func (s *Scheduler) Start(ctx context.Context) error {
 
 	// Run the tick loop in a background goroutine.
 	s.wg.Add(1)
-	go s.run(ctx)
+	go s.run(runCtx)
 
 	return nil
 }

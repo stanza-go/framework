@@ -21,5 +21,11 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      - name: Lint
+        uses: golangci/golangci-lint-action@v7
+        with:
+          version: v2.11.4
+          args: ./pkg/...
+
       - name: Test
         run: go test -race -count=1 ./pkg/...

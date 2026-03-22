@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	nethttp "net/http"
@@ -93,10 +92,9 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 	s.listener = ln
 	go func() {
-		if err := s.server.Serve(ln); err != nil && !errors.Is(err, nethttp.ErrServerClosed) {
-			// Unexpected serve error. The server is no longer accepting
-			// connections. Stop will still complete cleanly.
-		}
+		// Serve returns ErrServerClosed on graceful shutdown.
+		// Other errors mean the listener stopped, but Stop still completes cleanly.
+		_ = s.server.Serve(ln)
 	}()
 	return nil
 }
