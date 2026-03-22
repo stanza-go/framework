@@ -1,7 +1,9 @@
 package http
 
 import (
+	"encoding/csv"
 	"encoding/json"
+	"time"
 )
 
 // Common HTTP status codes re-exported for convenience, so consumers
@@ -47,4 +49,39 @@ func WriteJSON(w ResponseWriter, status int, v any) {
 //	{"error": "message"}
 func WriteError(w ResponseWriter, status int, message string) {
 	WriteJSON(w, status, map[string]string{"error": message})
+}
+
+// WriteCSV writes a CSV file response. It sets Content-Type and
+// Content-Disposition headers, writes the header row, then calls fn
+// repeatedly to produce data rows. The fn callback should return the
+// next row as a string slice, or nil to stop iteration.
+//
+// Example:
+//
+//	rows, _ := db.Query(sql, args...)
+//	defer rows.Close()
+//	http.WriteCSV(w, "users", []string{"ID", "Email", "Name"}, func() []string {
+//	    if !rows.Next() {
+//	        return nil
+//	    }
+//	    var id int64
+//	    var email, name string
+//	    if err := rows.Scan(&id, &email, &name); err != nil {
+//	        return nil
+//	    }
+//	    return []string{strconv.FormatInt(id, 10), email, name}
+//	})
+func WriteCSV(w ResponseWriter, entity string, header []string, fn func() []string) {
+	w.Header().Set("Content-Type", "text/csv")
+	w.Header().Set("Content-Disposition", "attachment; filename="+entity+"-"+time.Now().UTC().Format("20060102")+".csv")
+	cw := csv.NewWriter(w)
+	_ = cw.Write(header)
+	for {
+		row := fn()
+		if row == nil {
+			break
+		}
+		_ = cw.Write(row)
+	}
+	cw.Flush()
 }
