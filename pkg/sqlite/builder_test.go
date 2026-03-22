@@ -1209,6 +1209,132 @@ func TestWhereOr_ThreeConditions(t *testing.T) {
 	}
 }
 
+func TestSelect_Distinct(t *testing.T) {
+	sql, args := Select("role").
+		From("users").
+		Distinct().
+		Build()
+
+	wantSQL := "SELECT DISTINCT role FROM users"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want empty", args)
+	}
+}
+
+func TestSelect_DistinctWithWhere(t *testing.T) {
+	sql, args := Select("status", "type").
+		From("jobs").
+		Distinct().
+		Where("created_at > ?", "2025-01-01").
+		OrderBy("status", "ASC").
+		Build()
+
+	wantSQL := "SELECT DISTINCT status, type FROM jobs WHERE created_at > ? ORDER BY status ASC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_DistinctWithGroupBy(t *testing.T) {
+	sql, args := Select("entity_type", "COUNT(*) AS total").
+		From("api_keys").
+		Distinct().
+		GroupBy("entity_type").
+		Having("COUNT(*) > ?", 1).
+		Build()
+
+	wantSQL := "SELECT DISTINCT entity_type, COUNT(*) AS total FROM api_keys GROUP BY entity_type HAVING COUNT(*) > ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSum(t *testing.T) {
+	got := Sum("amount")
+	want := "SUM(amount)"
+	if got != want {
+		t.Errorf("Sum = %q, want %q", got, want)
+	}
+}
+
+func TestAvg(t *testing.T) {
+	got := Avg("duration")
+	want := "AVG(duration)"
+	if got != want {
+		t.Errorf("Avg = %q, want %q", got, want)
+	}
+}
+
+func TestMin(t *testing.T) {
+	got := Min("created_at")
+	want := "MIN(created_at)"
+	if got != want {
+		t.Errorf("Min = %q, want %q", got, want)
+	}
+}
+
+func TestMax(t *testing.T) {
+	got := Max("price")
+	want := "MAX(price)"
+	if got != want {
+		t.Errorf("Max = %q, want %q", got, want)
+	}
+}
+
+func TestAs(t *testing.T) {
+	got := As(Sum("amount"), "total")
+	want := "SUM(amount) AS total"
+	if got != want {
+		t.Errorf("As = %q, want %q", got, want)
+	}
+}
+
+func TestAggregates_InSelect(t *testing.T) {
+	sql, args := Select("status", As(Sum("amount"), "total"), As(Avg("duration"), "avg_dur")).
+		From("orders").
+		Where("created_at > ?", "2025-01-01").
+		GroupBy("status").
+		Having("SUM(amount) > ?", 100).
+		OrderBy("total", "DESC").
+		Build()
+
+	wantSQL := "SELECT status, SUM(amount) AS total, AVG(duration) AS avg_dur FROM orders WHERE created_at > ? GROUP BY status HAVING SUM(amount) > ? ORDER BY total DESC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01", 100}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestAggregates_MinMaxRange(t *testing.T) {
+	sql, args := Select(As(Min("price"), "min_price"), As(Max("price"), "max_price")).
+		From("products").
+		Where("category = ?", "electronics").
+		Build()
+
+	wantSQL := "SELECT MIN(price) AS min_price, MAX(price) AS max_price FROM products WHERE category = ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"electronics"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
 func TestCount_WhereOr(t *testing.T) {
 	sql, args := Count("api_keys").
 		WhereOr(

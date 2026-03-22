@@ -18,6 +18,41 @@ func EscapeLike(s string) string {
 	return s
 }
 
+// ---------------------------------------------------------------------------
+// Aggregate column helpers
+// ---------------------------------------------------------------------------
+
+// Sum returns a SUM(column) expression for use in Select columns.
+//
+//	sqlite.Select(sqlite.Sum("amount")).From("orders").Build()
+//	// → SELECT SUM(amount) FROM orders
+func Sum(column string) string { return "SUM(" + column + ")" }
+
+// Avg returns an AVG(column) expression for use in Select columns.
+//
+//	sqlite.Select(sqlite.Avg("duration")).From("jobs").Build()
+//	// → SELECT AVG(duration) FROM jobs
+func Avg(column string) string { return "AVG(" + column + ")" }
+
+// Min returns a MIN(column) expression for use in Select columns.
+//
+//	sqlite.Select(sqlite.Min("created_at")).From("users").Build()
+//	// → SELECT MIN(created_at) FROM users
+func Min(column string) string { return "MIN(" + column + ")" }
+
+// Max returns a MAX(column) expression for use in Select columns.
+//
+//	sqlite.Select(sqlite.Max("price")).From("products").Build()
+//	// → SELECT MAX(price) FROM products
+func Max(column string) string { return "MAX(" + column + ")" }
+
+// As appends an AS alias to a column expression. Useful with aggregate helpers.
+//
+//	sqlite.Select("status", sqlite.As(sqlite.Sum("amount"), "total")).
+//		From("orders").GroupBy("status").Build()
+//	// → SELECT status, SUM(amount) AS total FROM orders GROUP BY status
+func As(expr, alias string) string { return expr + " AS " + alias }
+
 // whereClause holds a condition fragment and its bound arguments.
 type whereClause struct {
 	cond string
@@ -157,6 +192,7 @@ func appendWheres(sb *strings.Builder, wheres []whereClause, args []any) []any {
 type SelectBuilder struct {
 	columns   []string
 	table     string
+	distinct  bool
 	joins     []joinClause
 	wheres    []whereClause
 	groupBys  []string
@@ -176,6 +212,16 @@ func Select(columns ...string) *SelectBuilder {
 // From sets the table to select from.
 func (b *SelectBuilder) From(table string) *SelectBuilder {
 	b.table = table
+	return b
+}
+
+// Distinct adds the DISTINCT keyword to the SELECT query, eliminating
+// duplicate rows from the result set.
+//
+//	sqlite.Select("role").From("users").Distinct().Build()
+//	// → SELECT DISTINCT role FROM users
+func (b *SelectBuilder) Distinct() *SelectBuilder {
+	b.distinct = true
 	return b
 }
 
@@ -337,7 +383,11 @@ func (b *SelectBuilder) Build() (string, []any) {
 	var sb strings.Builder
 	var args []any
 
-	sb.WriteString("SELECT ")
+	if b.distinct {
+		sb.WriteString("SELECT DISTINCT ")
+	} else {
+		sb.WriteString("SELECT ")
+	}
 	sb.WriteString(strings.Join(b.columns, ", "))
 	sb.WriteString(" FROM ")
 	sb.WriteString(b.table)
