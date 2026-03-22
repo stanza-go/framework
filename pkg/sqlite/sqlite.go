@@ -355,14 +355,17 @@ type Result struct {
 // it holds the database mutex for the duration of iteration, so callers
 // should close rows promptly. When created inside a transaction, the
 // transaction owns the mutex.
+//
+// Fields are ordered to minimize padding: pointers and slices first,
+// then the error interface, then bools packed together at the end.
 type Rows struct {
 	db      *DB
 	stmt    *C.sqlite3_stmt
 	cols    []string
+	err     error
 	closed  bool
 	stepped bool
 	hasRow  bool
-	err     error
 	tx      bool // true when rows belong to a transaction
 }
 

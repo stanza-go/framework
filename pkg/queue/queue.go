@@ -28,6 +28,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -392,24 +393,25 @@ func (q *Queue) Job(id int64) (Job, error) {
 // JobCount returns the total number of jobs matching the given filter.
 // The Limit and Offset fields of the filter are ignored.
 func (q *Queue) JobCount(f Filter) (int, error) {
-	query := `SELECT COUNT(*) FROM _queue_jobs WHERE 1=1`
+	var sb strings.Builder
 	var args []any
+	sb.WriteString(`SELECT COUNT(*) FROM _queue_jobs WHERE 1=1`)
 
 	if f.Queue != "" {
-		query += " AND queue = ?"
+		sb.WriteString(" AND queue = ?")
 		args = append(args, f.Queue)
 	}
 	if f.Type != "" {
-		query += " AND type = ?"
+		sb.WriteString(" AND type = ?")
 		args = append(args, f.Type)
 	}
 	if f.Status != "" {
-		query += " AND status = ?"
+		sb.WriteString(" AND status = ?")
 		args = append(args, f.Status)
 	}
 
 	var count int
-	err := q.db.QueryRow(query, args...).Scan(&count)
+	err := q.db.QueryRow(sb.String(), args...).Scan(&count)
 	if err != nil {
 		return 0, fmt.Errorf("queue: job count: %w", err)
 	}
@@ -418,39 +420,40 @@ func (q *Queue) JobCount(f Filter) (int, error) {
 
 // Jobs returns jobs matching the given filter.
 func (q *Queue) Jobs(f Filter) ([]Job, error) {
-	query := `SELECT id, queue, type, payload, status, attempts, max_attempts,
+	var sb strings.Builder
+	var args []any
+	sb.WriteString(`SELECT id, queue, type, payload, status, attempts, max_attempts,
 	                 COALESCE(last_error, ''), run_at, COALESCE(started_at, ''),
 	                 COALESCE(completed_at, ''), created_at, updated_at
-	          FROM _queue_jobs WHERE 1=1`
-	var args []any
+	          FROM _queue_jobs WHERE 1=1`)
 
 	if f.Queue != "" {
-		query += " AND queue = ?"
+		sb.WriteString(" AND queue = ?")
 		args = append(args, f.Queue)
 	}
 	if f.Type != "" {
-		query += " AND type = ?"
+		sb.WriteString(" AND type = ?")
 		args = append(args, f.Type)
 	}
 	if f.Status != "" {
-		query += " AND status = ?"
+		sb.WriteString(" AND status = ?")
 		args = append(args, f.Status)
 	}
 
-	query += " ORDER BY id DESC"
+	sb.WriteString(" ORDER BY id DESC")
 
 	limit := f.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	query += " LIMIT ?"
+	sb.WriteString(" LIMIT ?")
 	args = append(args, limit)
 	if f.Offset > 0 {
-		query += " OFFSET ?"
+		sb.WriteString(" OFFSET ?")
 		args = append(args, f.Offset)
 	}
 
-	rows, err := q.db.Query(query, args...)
+	rows, err := q.db.Query(sb.String(), args...)
 	if err != nil {
 		return nil, fmt.Errorf("queue: jobs: %w", err)
 	}

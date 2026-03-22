@@ -7,7 +7,9 @@ import (
 	"hash/crc32"
 	"net"
 	nethttp "net/http"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // ETagConfig configures the ETag middleware.
@@ -17,6 +19,12 @@ type ETagConfig struct {
 	// identity. Use weak ETags when responses may vary slightly
 	// (e.g., different whitespace) but are logically the same.
 	Weak bool
+}
+
+var etagBufPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 1024))
+	},
 }
 
 // ETag returns middleware that computes ETags for responses and handles
@@ -46,15 +54,20 @@ func ETag(cfg ETagConfig) Middleware {
 				return
 			}
 
+			buf := etagBufPool.Get().(*bytes.Buffer)
+			buf.Reset()
+
 			ew := &etagWriter{
 				ResponseWriter: w,
 				ifNoneMatch:    r.Header.Get("If-None-Match"),
 				weak:           cfg.Weak,
-				buf:            &bytes.Buffer{},
+				buf:            buf,
 			}
 
 			next.ServeHTTP(ew, r)
 			ew.finish()
+
+			etagBufPool.Put(buf)
 		})
 	}
 }
@@ -139,7 +152,7 @@ func (ew *etagWriter) finish() {
 
 	// Compute CRC32 hash.
 	hash := crc32.ChecksumIEEE(body)
-	etag := fmt.Sprintf(`"%x"`, hash)
+	etag := `"` + strconv.FormatUint(uint64(hash), 16) + `"`
 	if ew.weak {
 		etag = "W/" + etag
 	}

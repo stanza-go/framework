@@ -396,8 +396,8 @@ func (c *Conn) RemoteAddr() net.Addr {
 // readFrame reads a single WebSocket frame from the connection.
 func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 	// Read first two bytes: FIN + opcode, MASK + payload length.
-	header := make([]byte, 2)
-	if _, err = io.ReadFull(c.br, header); err != nil {
+	var header [2]byte
+	if _, err = io.ReadFull(c.br, header[:]); err != nil {
 		return false, 0, nil, fmt.Errorf("websocket: read frame header: %w", err)
 	}
 
@@ -418,17 +418,17 @@ func (c *Conn) readFrame() (fin bool, opcode byte, payload []byte, err error) {
 	// Extended payload length.
 	switch length {
 	case 126:
-		ext := make([]byte, 2)
-		if _, err = io.ReadFull(c.br, ext); err != nil {
+		var ext [2]byte
+		if _, err = io.ReadFull(c.br, ext[:]); err != nil {
 			return false, 0, nil, fmt.Errorf("websocket: read extended length: %w", err)
 		}
-		length = uint64(binary.BigEndian.Uint16(ext))
+		length = uint64(binary.BigEndian.Uint16(ext[:]))
 	case 127:
-		ext := make([]byte, 8)
-		if _, err = io.ReadFull(c.br, ext); err != nil {
+		var ext [8]byte
+		if _, err = io.ReadFull(c.br, ext[:]); err != nil {
 			return false, 0, nil, fmt.Errorf("websocket: read extended length: %w", err)
 		}
-		length = binary.BigEndian.Uint64(ext)
+		length = binary.BigEndian.Uint64(ext[:])
 		if length>>63 != 0 {
 			return false, 0, nil, &CloseError{Code: CloseProtocolError, Text: "payload length overflow"}
 		}
@@ -498,18 +498,18 @@ func (c *Conn) writeFrame(fin bool, opcode byte, payload []byte) error {
 		if err := c.bw.WriteByte(126); err != nil {
 			return fmt.Errorf("websocket: write frame: %w", err)
 		}
-		ext := make([]byte, 2)
-		binary.BigEndian.PutUint16(ext, uint16(length))
-		if _, err := c.bw.Write(ext); err != nil {
+		var ext [2]byte
+		binary.BigEndian.PutUint16(ext[:], uint16(length))
+		if _, err := c.bw.Write(ext[:]); err != nil {
 			return fmt.Errorf("websocket: write frame: %w", err)
 		}
 	default:
 		if err := c.bw.WriteByte(127); err != nil {
 			return fmt.Errorf("websocket: write frame: %w", err)
 		}
-		ext := make([]byte, 8)
-		binary.BigEndian.PutUint64(ext, uint64(length))
-		if _, err := c.bw.Write(ext); err != nil {
+		var ext [8]byte
+		binary.BigEndian.PutUint64(ext[:], uint64(length))
+		if _, err := c.bw.Write(ext[:]); err != nil {
 			return fmt.Errorf("websocket: write frame: %w", err)
 		}
 	}

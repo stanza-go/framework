@@ -55,13 +55,25 @@ func CreateJWT(key []byte, claims Claims) (string, error) {
 	}
 
 	encodedPayload := base64URLEncode(payload)
-	signingInput := jwtHeader + "." + encodedPayload
 
+	// Write signing input to HMAC in parts to avoid allocating an
+	// intermediate signingInput string.
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(signingInput))
+	mac.Write([]byte(jwtHeader))
+	mac.Write([]byte{'.'})
+	mac.Write([]byte(encodedPayload))
 	signature := base64URLEncode(mac.Sum(nil))
 
-	return signingInput + "." + signature, nil
+	// Build the full token in a single pre-sized allocation.
+	var sb strings.Builder
+	sb.Grow(len(jwtHeader) + 1 + len(encodedPayload) + 1 + len(signature))
+	sb.WriteString(jwtHeader)
+	sb.WriteByte('.')
+	sb.WriteString(encodedPayload)
+	sb.WriteByte('.')
+	sb.WriteString(signature)
+
+	return sb.String(), nil
 }
 
 // ValidateJWT parses and verifies a JWT string signed with key. It
@@ -74,15 +86,17 @@ func ValidateJWT(key []byte, token string) (Claims, error) {
 		return Claims{}, ErrInvalidToken
 	}
 
-	signingInput := parts[0] + "." + parts[1]
-
 	sig, err := base64URLDecode(parts[2])
 	if err != nil {
 		return Claims{}, ErrInvalidToken
 	}
 
+	// Write signing input to HMAC in parts to avoid allocating an
+	// intermediate signingInput string.
 	mac := hmac.New(sha256.New, key)
-	mac.Write([]byte(signingInput))
+	mac.Write([]byte(parts[0]))
+	mac.Write([]byte{'.'})
+	mac.Write([]byte(parts[1]))
 	expected := mac.Sum(nil)
 
 	if !hmac.Equal(sig, expected) {
