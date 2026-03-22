@@ -109,6 +109,30 @@ func whereSearchClause(search string, columns []string) (whereClause, bool) {
 	return whereClause{cond: sb.String(), args: args}, true
 }
 
+// subSelectClause builds a "column OP (SELECT ...)" condition by rendering
+// the given SelectBuilder as a subquery.
+func subSelectClause(column, op string, sub *SelectBuilder) whereClause {
+	subSQL, subArgs := sub.Build()
+	return whereClause{
+		cond: column + " " + op + " (" + subSQL + ")",
+		args: subArgs,
+	}
+}
+
+// existsClause builds an "EXISTS (SELECT ...)" or "NOT EXISTS (SELECT ...)"
+// condition by rendering the given SelectBuilder as a subquery.
+func existsClause(not bool, sub *SelectBuilder) whereClause {
+	subSQL, subArgs := sub.Build()
+	prefix := "EXISTS"
+	if not {
+		prefix = "NOT EXISTS"
+	}
+	return whereClause{
+		cond: prefix + " (" + subSQL + ")",
+		args: subArgs,
+	}
+}
+
 // appendWheres writes WHERE clauses to the builder and collects arguments.
 func appendWheres(sb *strings.Builder, wheres []whereClause, args []any) []any {
 	if len(wheres) == 0 {
@@ -217,6 +241,49 @@ func (b *SelectBuilder) WhereSearch(search string, columns ...string) *SelectBui
 	if wc, ok := whereSearchClause(search, columns); ok {
 		b.wheres = append(b.wheres, wc)
 	}
+	return b
+}
+
+// WhereInSelect adds a "column IN (SELECT ...)" condition using a subquery.
+// The subquery is built from the given SelectBuilder, and its arguments are
+// merged into the outer query's argument list.
+//
+//	Select("*").From("users").
+//		WhereInSelect("id", Select("user_id").From("active_sessions").Where("expires_at > ?", now))
+//	// → WHERE id IN (SELECT user_id FROM active_sessions WHERE expires_at > ?)
+func (b *SelectBuilder) WhereInSelect(column string, sub *SelectBuilder) *SelectBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "IN", sub))
+	return b
+}
+
+// WhereNotInSelect adds a "column NOT IN (SELECT ...)" condition using a subquery.
+//
+//	Delete("notifications").
+//		WhereNotInSelect("entity_id", Select("id").From("admins").Where("is_active = 1"))
+//	// → WHERE entity_id NOT IN (SELECT id FROM admins WHERE is_active = 1)
+func (b *SelectBuilder) WhereNotInSelect(column string, sub *SelectBuilder) *SelectBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "NOT IN", sub))
+	return b
+}
+
+// WhereExists adds an "EXISTS (SELECT ...)" condition using a subquery.
+// The subquery typically uses SELECT 1 and correlates with the outer query.
+//
+//	Select("*").From("users u").
+//		WhereExists(Select("1").From("orders o").Where("o.user_id = u.id"))
+//	// → WHERE EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)
+func (b *SelectBuilder) WhereExists(sub *SelectBuilder) *SelectBuilder {
+	b.wheres = append(b.wheres, existsClause(false, sub))
+	return b
+}
+
+// WhereNotExists adds a "NOT EXISTS (SELECT ...)" condition using a subquery.
+//
+//	Select("*").From("users u").
+//		WhereNotExists(Select("1").From("orders o").Where("o.user_id = u.id"))
+//	// → WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.user_id = u.id)
+func (b *SelectBuilder) WhereNotExists(sub *SelectBuilder) *SelectBuilder {
+	b.wheres = append(b.wheres, existsClause(true, sub))
 	return b
 }
 
@@ -402,6 +469,34 @@ func (b *CountBuilder) WhereSearch(search string, columns ...string) *CountBuild
 	if wc, ok := whereSearchClause(search, columns); ok {
 		b.wheres = append(b.wheres, wc)
 	}
+	return b
+}
+
+// WhereInSelect adds a "column IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereInSelect for details.
+func (b *CountBuilder) WhereInSelect(column string, sub *SelectBuilder) *CountBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "IN", sub))
+	return b
+}
+
+// WhereNotInSelect adds a "column NOT IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotInSelect for details.
+func (b *CountBuilder) WhereNotInSelect(column string, sub *SelectBuilder) *CountBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "NOT IN", sub))
+	return b
+}
+
+// WhereExists adds an "EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereExists for details.
+func (b *CountBuilder) WhereExists(sub *SelectBuilder) *CountBuilder {
+	b.wheres = append(b.wheres, existsClause(false, sub))
+	return b
+}
+
+// WhereNotExists adds a "NOT EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotExists for details.
+func (b *CountBuilder) WhereNotExists(sub *SelectBuilder) *CountBuilder {
+	b.wheres = append(b.wheres, existsClause(true, sub))
 	return b
 }
 
@@ -702,6 +797,34 @@ func (b *UpdateBuilder) WhereSearch(search string, columns ...string) *UpdateBui
 	return b
 }
 
+// WhereInSelect adds a "column IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereInSelect for details.
+func (b *UpdateBuilder) WhereInSelect(column string, sub *SelectBuilder) *UpdateBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "IN", sub))
+	return b
+}
+
+// WhereNotInSelect adds a "column NOT IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotInSelect for details.
+func (b *UpdateBuilder) WhereNotInSelect(column string, sub *SelectBuilder) *UpdateBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "NOT IN", sub))
+	return b
+}
+
+// WhereExists adds an "EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereExists for details.
+func (b *UpdateBuilder) WhereExists(sub *SelectBuilder) *UpdateBuilder {
+	b.wheres = append(b.wheres, existsClause(false, sub))
+	return b
+}
+
+// WhereNotExists adds a "NOT EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotExists for details.
+func (b *UpdateBuilder) WhereNotExists(sub *SelectBuilder) *UpdateBuilder {
+	b.wheres = append(b.wheres, existsClause(true, sub))
+	return b
+}
+
 // Build produces the SQL string and argument slice.
 // SET arguments come before WHERE arguments in the returned slice.
 func (b *UpdateBuilder) Build() (string, []any) {
@@ -786,6 +909,34 @@ func (b *DeleteBuilder) WhereSearch(search string, columns ...string) *DeleteBui
 	if wc, ok := whereSearchClause(search, columns); ok {
 		b.wheres = append(b.wheres, wc)
 	}
+	return b
+}
+
+// WhereInSelect adds a "column IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereInSelect for details.
+func (b *DeleteBuilder) WhereInSelect(column string, sub *SelectBuilder) *DeleteBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "IN", sub))
+	return b
+}
+
+// WhereNotInSelect adds a "column NOT IN (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotInSelect for details.
+func (b *DeleteBuilder) WhereNotInSelect(column string, sub *SelectBuilder) *DeleteBuilder {
+	b.wheres = append(b.wheres, subSelectClause(column, "NOT IN", sub))
+	return b
+}
+
+// WhereExists adds an "EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereExists for details.
+func (b *DeleteBuilder) WhereExists(sub *SelectBuilder) *DeleteBuilder {
+	b.wheres = append(b.wheres, existsClause(false, sub))
+	return b
+}
+
+// WhereNotExists adds a "NOT EXISTS (SELECT ...)" condition using a subquery.
+// See SelectBuilder.WhereNotExists for details.
+func (b *DeleteBuilder) WhereNotExists(sub *SelectBuilder) *DeleteBuilder {
+	b.wheres = append(b.wheres, existsClause(true, sub))
 	return b
 }
 
