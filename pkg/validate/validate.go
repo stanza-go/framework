@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // FieldError represents a single field validation failure. Use the
@@ -169,6 +170,23 @@ func Positive(field string, value int) *FieldError {
 func InRange(field string, value, min, max int) *FieldError {
 	if value < min || value > max {
 		return &FieldError{Field: field, Message: "must be between " + itoa(min) + " and " + itoa(max)}
+	}
+	return nil
+}
+
+// FutureDate checks that a string value is a valid RFC 3339 timestamp
+// in the future. An empty value is considered valid — use Required to
+// enforce presence.
+func FutureDate(field, value string) *FieldError {
+	if value == "" {
+		return nil
+	}
+	t, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return &FieldError{Field: field, Message: "must be a valid ISO 8601 date"}
+	}
+	if !t.After(time.Now().UTC()) {
+		return &FieldError{Field: field, Message: "must be a date in the future"}
 	}
 	return nil
 }
