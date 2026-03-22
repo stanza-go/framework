@@ -105,6 +105,18 @@ func (b *SelectBuilder) Where(cond string, args ...any) *SelectBuilder {
 	return b
 }
 
+// WhereNull adds a "column IS NULL" condition.
+func (b *SelectBuilder) WhereNull(column string) *SelectBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NULL"})
+	return b
+}
+
+// WhereNotNull adds a "column IS NOT NULL" condition.
+func (b *SelectBuilder) WhereNotNull(column string) *SelectBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NOT NULL"})
+	return b
+}
+
 // WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
 // the condition becomes "1 = 0" (always false).
 func (b *SelectBuilder) WhereIn(column string, values ...any) *SelectBuilder {
@@ -257,6 +269,18 @@ func CountFrom(sb *SelectBuilder) *CountBuilder {
 // Where adds an AND condition.
 func (b *CountBuilder) Where(cond string, args ...any) *CountBuilder {
 	b.wheres = append(b.wheres, whereClause{cond: cond, args: args})
+	return b
+}
+
+// WhereNull adds a "column IS NULL" condition.
+func (b *CountBuilder) WhereNull(column string) *CountBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NULL"})
+	return b
+}
+
+// WhereNotNull adds a "column IS NOT NULL" condition.
+func (b *CountBuilder) WhereNotNull(column string) *CountBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NOT NULL"})
 	return b
 }
 
@@ -425,6 +449,18 @@ func (b *UpdateBuilder) Where(cond string, args ...any) *UpdateBuilder {
 	return b
 }
 
+// WhereNull adds a "column IS NULL" condition.
+func (b *UpdateBuilder) WhereNull(column string) *UpdateBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NULL"})
+	return b
+}
+
+// WhereNotNull adds a "column IS NOT NULL" condition.
+func (b *UpdateBuilder) WhereNotNull(column string) *UpdateBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NOT NULL"})
+	return b
+}
+
 // WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
 // the condition becomes "1 = 0" (always false).
 func (b *UpdateBuilder) WhereIn(column string, values ...any) *UpdateBuilder {
@@ -479,6 +515,18 @@ func Delete(table string) *DeleteBuilder {
 // Where adds an AND condition.
 func (b *DeleteBuilder) Where(cond string, args ...any) *DeleteBuilder {
 	b.wheres = append(b.wheres, whereClause{cond: cond, args: args})
+	return b
+}
+
+// WhereNull adds a "column IS NULL" condition.
+func (b *DeleteBuilder) WhereNull(column string) *DeleteBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NULL"})
+	return b
+}
+
+// WhereNotNull adds a "column IS NOT NULL" condition.
+func (b *DeleteBuilder) WhereNotNull(column string) *DeleteBuilder {
+	b.wheres = append(b.wheres, whereClause{cond: column + " IS NOT NULL"})
 	return b
 }
 
