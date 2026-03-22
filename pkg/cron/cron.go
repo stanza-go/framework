@@ -333,7 +333,7 @@ func (s *Scheduler) run(ctx context.Context) {
 // tick checks all jobs and dispatches those that are due.
 func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 	s.mu.Lock()
-	var due []*job
+	due := make([]*job, 0, len(s.jobs))
 	for _, j := range s.jobs {
 		if !j.enabled || j.running {
 			continue

@@ -49,6 +49,7 @@ const (
 
 // Client delivers webhook events to endpoints.
 type Client struct {
+	httpClient     *http.Client
 	timeout        time.Duration
 	maxRetries     int
 	retryBaseDelay time.Duration
@@ -146,6 +147,7 @@ func NewClient(opts ...Option) *Client {
 		opt(&cfg)
 	}
 	return &Client{
+		httpClient:     &http.Client{Timeout: cfg.timeout},
 		timeout:        cfg.timeout,
 		maxRetries:     cfg.maxRetries,
 		retryBaseDelay: cfg.retryBaseDelay,
@@ -187,8 +189,7 @@ func (c *Client) Send(ctx context.Context, d *Delivery) (*Result, error) {
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Timeout: c.timeout}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("webhook: send request: %w", err)
 	}
@@ -253,8 +254,7 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 			req.Header.Set(k, v)
 		}
 
-		client := &http.Client{Timeout: c.timeout}
-		resp, err := client.Do(req)
+		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			lastErr = fmt.Errorf("webhook: send request (attempt %d): %w", attempt+1, err)
 			continue
@@ -291,15 +291,19 @@ func (c *Client) SendWithRetry(ctx context.Context, d *Delivery) (*Result, error
 	return nil, lastErr
 }
 
+// dot is a single-byte slice used by Sign to avoid per-call heap
+// allocations for the "." separator.
+var dot = []byte(".")
+
 // Sign computes the HMAC-SHA256 signature for a webhook delivery. The signed
 // content is "{id}.{timestamp}.{body}". The returned value is the hex-encoded
 // HMAC digest.
 func Sign(secret, id, timestamp string, body []byte) string {
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(id))
-	mac.Write([]byte("."))
+	mac.Write(dot)
 	mac.Write([]byte(timestamp))
-	mac.Write([]byte("."))
+	mac.Write(dot)
 	mac.Write(body)
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -312,8 +316,9 @@ func Verify(secret, id, timestamp, signature string, body []byte) bool {
 }
 
 // generateID creates a random delivery ID in the format "whd_<hex>".
+// Uses a stack-allocated array to avoid heap allocation for the random bytes.
 func generateID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return "whd_" + hex.EncodeToString(b)
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return "whd_" + hex.EncodeToString(b[:])
 }

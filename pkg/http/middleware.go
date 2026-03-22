@@ -65,14 +65,15 @@ func RequestLogger(logger *log.Logger) Middleware {
 
 			next.ServeHTTP(rec, r)
 
-			fields := []log.Field{
-				log.String("method", r.Method),
-				log.String("path", r.URL.Path),
-				log.Int("status", rec.status),
-				log.Duration("duration", time.Since(start)),
-				log.Int64("bytes", rec.written),
-				log.String("remote", r.RemoteAddr),
-			}
+			// Pre-allocate with capacity 7 to avoid growth when request_id
+			// is present (the common case with RequestID middleware).
+			fields := make([]log.Field, 6, 7)
+			fields[0] = log.String("method", r.Method)
+			fields[1] = log.String("path", r.URL.Path)
+			fields[2] = log.Int("status", rec.status)
+			fields[3] = log.Duration("duration", time.Since(start))
+			fields[4] = log.Int64("bytes", rec.written)
+			fields[5] = log.String("remote", r.RemoteAddr)
 
 			// Include request ID if the RequestID middleware ran earlier
 			// in the chain.

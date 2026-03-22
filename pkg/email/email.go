@@ -29,10 +29,11 @@ const resendEndpoint = "https://api.resend.com/emails"
 
 // Client sends emails via the Resend API.
 type Client struct {
-	apiKey   string
-	from     string
-	endpoint string
-	timeout  time.Duration
+	apiKey     string
+	authHeader string
+	from       string
+	endpoint   string
+	httpClient *http.Client
 }
 
 // Message represents an email to be sent.
@@ -103,10 +104,11 @@ func New(apiKey string, opts ...Option) *Client {
 		opt(&cfg)
 	}
 	return &Client{
-		apiKey:   apiKey,
-		from:     cfg.from,
-		endpoint: cfg.endpoint,
-		timeout:  cfg.timeout,
+		apiKey:     apiKey,
+		authHeader: "Bearer " + apiKey,
+		from:       cfg.from,
+		endpoint:   cfg.endpoint,
+		httpClient: &http.Client{Timeout: cfg.timeout},
 	}
 }
 
@@ -161,11 +163,10 @@ func (c *Client) Send(ctx context.Context, msg Message) (SendResult, error) {
 	if err != nil {
 		return SendResult{}, fmt.Errorf("email: create request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", c.authHeader)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: c.timeout}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return SendResult{}, fmt.Errorf("email: send request: %w", err)
 	}

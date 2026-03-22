@@ -139,7 +139,8 @@ func (u Upgrader) Upgrade(w ResponseWriter, r *Request) (*Conn, error) {
 
 	accept := computeAcceptKey(key)
 
-	var buf []byte
+	// Pre-allocate buffer for the upgrade response (~150 bytes).
+	buf := make([]byte, 0, 192)
 	buf = append(buf, "HTTP/1.1 101 Switching Protocols\r\n"...)
 	buf = append(buf, "Upgrade: websocket\r\n"...)
 	buf = append(buf, "Connection: Upgrade\r\n"...)
@@ -603,11 +604,20 @@ func defaultCheckOrigin(r *Request) bool {
 }
 
 // headerContains returns true if the named header contains the target
-// value (case-insensitive, comma-separated).
+// value (case-insensitive, comma-separated). Parses without allocating
+// a slice (avoids strings.Split).
 func headerContains(h nethttp.Header, key, target string) bool {
 	for _, v := range h[nethttp.CanonicalHeaderKey(key)] {
-		for _, s := range strings.Split(v, ",") {
-			if strings.EqualFold(strings.TrimSpace(s), target) {
+		for v != "" {
+			var token string
+			if i := strings.IndexByte(v, ','); i != -1 {
+				token = v[:i]
+				v = v[i+1:]
+			} else {
+				token = v
+				v = ""
+			}
+			if strings.EqualFold(strings.TrimSpace(token), target) {
 				return true
 			}
 		}

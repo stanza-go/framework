@@ -150,12 +150,20 @@ func (ew *etagWriter) finish() {
 		return
 	}
 
-	// Compute CRC32 hash.
+	// Compute CRC32 hash. Build the ETag string with a stack-allocated
+	// buffer to avoid intermediate string allocations.
 	hash := crc32.ChecksumIEEE(body)
-	etag := `"` + strconv.FormatUint(uint64(hash), 16) + `"`
+	var buf [24]byte // W/"xxxxxxxx" is at most 13 bytes
+	n := 0
 	if ew.weak {
-		etag = "W/" + etag
+		buf[0] = 'W'
+		buf[1] = '/'
+		n = 2
 	}
+	buf[n] = '"'
+	n++
+	hex := strconv.AppendUint(buf[:n], uint64(hash), 16)
+	etag := string(append(hex, '"'))
 
 	ew.ResponseWriter.Header().Set("ETag", etag)
 
@@ -181,7 +189,16 @@ func etagMatches(ifNoneMatch, etag string) bool {
 	// Strip W/ prefix for weak comparison.
 	bareEtag := stripWeakPrefix(etag)
 
-	for _, candidate := range strings.Split(ifNoneMatch, ",") {
+	// Parse comma-separated list without allocating a slice.
+	for ifNoneMatch != "" {
+		var candidate string
+		if i := strings.IndexByte(ifNoneMatch, ','); i != -1 {
+			candidate = ifNoneMatch[:i]
+			ifNoneMatch = ifNoneMatch[i+1:]
+		} else {
+			candidate = ifNoneMatch
+			ifNoneMatch = ""
+		}
 		candidate = strings.TrimSpace(candidate)
 		if candidate == "" {
 			continue

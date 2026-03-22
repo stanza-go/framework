@@ -19,8 +19,8 @@ func TestNew(t *testing.T) {
 	if c.endpoint != resendEndpoint {
 		t.Fatalf("expected default endpoint, got %s", c.endpoint)
 	}
-	if c.timeout != 10*time.Second {
-		t.Fatalf("expected 10s timeout, got %v", c.timeout)
+	if c.httpClient.Timeout != 10*time.Second {
+		t.Fatalf("expected 10s timeout, got %v", c.httpClient.Timeout)
 	}
 }
 
@@ -36,8 +36,8 @@ func TestNewWithOptions(t *testing.T) {
 	if c.endpoint != "http://localhost:9999" {
 		t.Fatalf("expected custom endpoint, got %s", c.endpoint)
 	}
-	if c.timeout != 5*time.Second {
-		t.Fatalf("expected 5s timeout, got %v", c.timeout)
+	if c.httpClient.Timeout != 5*time.Second {
+		t.Fatalf("expected 5s timeout, got %v", c.httpClient.Timeout)
 	}
 }
 

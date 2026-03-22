@@ -94,10 +94,20 @@ func Compress(cfg CompressConfig) Middleware {
 }
 
 // acceptsGzip returns true if the request advertises gzip support in
-// the Accept-Encoding header.
+// the Accept-Encoding header. It parses the comma-separated list
+// without allocating a slice (avoids strings.Split).
 func acceptsGzip(r *Request) bool {
-	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
-		if strings.TrimSpace(part) == "gzip" {
+	ae := r.Header.Get("Accept-Encoding")
+	for ae != "" {
+		var token string
+		if i := strings.IndexByte(ae, ','); i != -1 {
+			token = ae[:i]
+			ae = ae[i+1:]
+		} else {
+			token = ae
+			ae = ""
+		}
+		if strings.TrimSpace(token) == "gzip" {
 			return true
 		}
 	}
