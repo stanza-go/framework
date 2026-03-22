@@ -1024,3 +1024,91 @@ func TestSelect_WhereInStrings(t *testing.T) {
 		t.Errorf("args = %v, want %v", args, wantArgs)
 	}
 }
+
+func TestInsertBatch_Basic(t *testing.T) {
+	sql, args := InsertBatch("settings").
+		Columns("key", "value", "group_name").
+		Row("site_name", "Stanza", "general").
+		Row("site_url", "https://stanza.dev", "general").
+		Row("theme", "light", "appearance").
+		Build()
+
+	wantSQL := "INSERT INTO settings (key, value, group_name) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"site_name", "Stanza", "general", "site_url", "https://stanza.dev", "general", "theme", "light", "appearance"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestInsertBatch_SingleRow(t *testing.T) {
+	sql, args := InsertBatch("users").
+		Columns("email", "name").
+		Row("alice@example.com", "Alice").
+		Build()
+
+	wantSQL := "INSERT INTO users (email, name) VALUES (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"alice@example.com", "Alice"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestInsertBatch_OrIgnore(t *testing.T) {
+	sql, args := InsertBatch("settings").
+		Columns("key", "value").
+		Row("k1", "v1").
+		Row("k2", "v2").
+		OrIgnore().
+		Build()
+
+	wantSQL := "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?), (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"k1", "v1", "k2", "v2"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestInsertBatch_OnConflict(t *testing.T) {
+	sql, args := InsertBatch("user_settings").
+		Columns("user_id", "key", "value", "updated_at").
+		Row("u1", "theme", "dark", "2026-01-01").
+		Row("u1", "lang", "en", "2026-01-01").
+		OnConflict([]string{"user_id", "key"}, []string{"value", "updated_at"}).
+		Build()
+
+	wantSQL := "INSERT INTO user_settings (user_id, key, value, updated_at) VALUES (?, ?, ?, ?), (?, ?, ?, ?) ON CONFLICT(user_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"u1", "theme", "dark", "2026-01-01", "u1", "lang", "en", "2026-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestInsertBatch_SingleColumn(t *testing.T) {
+	sql, args := InsertBatch("tags").
+		Columns("name").
+		Row("go").
+		Row("sqlite").
+		Row("web").
+		Build()
+
+	wantSQL := "INSERT INTO tags (name) VALUES (?), (?), (?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"go", "sqlite", "web"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}

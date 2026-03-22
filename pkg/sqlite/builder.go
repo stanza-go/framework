@@ -452,6 +452,108 @@ func (b *InsertBuilder) Build() (string, []any) {
 }
 
 // ---------------------------------------------------------------------------
+// INSERT BATCH
+// ---------------------------------------------------------------------------
+
+// InsertBatchBuilder builds multi-row INSERT queries. Use Columns to define
+// the column list, then Row to add each row of values. This generates a
+// single INSERT with multiple VALUES tuples, which is more efficient than
+// executing separate INSERT statements in a loop.
+//
+//	sqlite.InsertBatch("settings").
+//		Columns("key", "value", "group_name").
+//		Row("site_name", "Stanza", "general").
+//		Row("site_url", "https://stanza.dev", "general").
+//		OrIgnore().
+//		Build()
+//
+// Produces:
+//
+//	INSERT OR IGNORE INTO settings (key, value, group_name) VALUES (?, ?, ?), (?, ?, ?)
+type InsertBatchBuilder struct {
+	table           string
+	columns         []string
+	rows            [][]any
+	orIgnore        bool
+	conflictColumns []string
+	updateColumns   []string
+}
+
+// InsertBatch starts building a multi-row INSERT query for the given table.
+func InsertBatch(table string) *InsertBatchBuilder {
+	return &InsertBatchBuilder{table: table}
+}
+
+// Columns sets the column list for the INSERT. Must be called before Row.
+func (b *InsertBatchBuilder) Columns(columns ...string) *InsertBatchBuilder {
+	b.columns = columns
+	return b
+}
+
+// Row adds a row of values. The number of values must match the number of
+// columns set by Columns. Multiple calls add multiple rows.
+func (b *InsertBatchBuilder) Row(values ...any) *InsertBatchBuilder {
+	b.rows = append(b.rows, values)
+	return b
+}
+
+// OrIgnore makes the statement INSERT OR IGNORE (skips on conflict).
+func (b *InsertBatchBuilder) OrIgnore() *InsertBatchBuilder {
+	b.orIgnore = true
+	return b
+}
+
+// OnConflict adds an ON CONFLICT ... DO UPDATE SET clause for batch upsert.
+// See InsertBuilder.OnConflict for details.
+func (b *InsertBatchBuilder) OnConflict(conflictColumns, updateColumns []string) *InsertBatchBuilder {
+	b.conflictColumns = conflictColumns
+	b.updateColumns = updateColumns
+	return b
+}
+
+// Build produces the SQL string and argument slice. All row values are
+// flattened into a single argument slice in row order.
+func (b *InsertBatchBuilder) Build() (string, []any) {
+	var sb strings.Builder
+	args := make([]any, 0, len(b.columns)*len(b.rows))
+
+	if b.orIgnore {
+		sb.WriteString("INSERT OR IGNORE INTO ")
+	} else {
+		sb.WriteString("INSERT INTO ")
+	}
+	sb.WriteString(b.table)
+	sb.WriteString(" (")
+	sb.WriteString(strings.Join(b.columns, ", "))
+	sb.WriteString(") VALUES ")
+
+	placeholder := inPlaceholders(len(b.columns))
+	for i, row := range b.rows {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(placeholder)
+		args = append(args, row...)
+	}
+
+	if len(b.conflictColumns) > 0 && len(b.updateColumns) > 0 {
+		sb.WriteString(" ON CONFLICT(")
+		sb.WriteString(strings.Join(b.conflictColumns, ", "))
+		sb.WriteString(") DO UPDATE SET ")
+		for i, col := range b.updateColumns {
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			sb.WriteString(col)
+			sb.WriteString(" = excluded.")
+			sb.WriteString(col)
+		}
+	}
+
+	return sb.String(), args
+}
+
+// ---------------------------------------------------------------------------
 // UPDATE
 // ---------------------------------------------------------------------------
 
