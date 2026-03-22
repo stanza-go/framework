@@ -24,6 +24,41 @@ type whereClause struct {
 	args []any
 }
 
+// Condition represents a single SQL condition with bound arguments.
+// Create with Cond for use with WhereOr.
+type Condition struct {
+	cond string
+	args []any
+}
+
+// Cond creates a condition for use with WhereOr.
+//
+//	sqlite.Cond("status = ?", "active")
+//	sqlite.Cond("deleted_at IS NULL")
+func Cond(cond string, args ...any) Condition {
+	return Condition{cond: cond, args: args}
+}
+
+// whereOrClause builds a parenthesized OR group from multiple conditions.
+// Returns false if fewer than 2 conditions are provided.
+func whereOrClause(conds []Condition) (whereClause, bool) {
+	if len(conds) < 2 {
+		return whereClause{}, false
+	}
+	var sb strings.Builder
+	var args []any
+	sb.WriteByte('(')
+	for i, c := range conds {
+		if i > 0 {
+			sb.WriteString(" OR ")
+		}
+		sb.WriteString(c.cond)
+		args = append(args, c.args...)
+	}
+	sb.WriteByte(')')
+	return whereClause{cond: sb.String(), args: args}, true
+}
+
 // orderByClause holds a column expression and sort direction.
 type orderByClause struct {
 	expr string
@@ -150,6 +185,23 @@ func (b *SelectBuilder) WhereIn(column string, values ...any) *SelectBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereOr adds conditions grouped with OR. Each Cond is OR'd together and
+// the group is parenthesized so it composes correctly with other AND conditions.
+// Requires at least 2 conditions; fewer is a no-op (use Where for single conditions).
+//
+//	Delete("api_keys").
+//		WhereOr(
+//			sqlite.Cond("revoked_at IS NOT NULL AND revoked_at < ?", cutoff),
+//			sqlite.Cond("expires_at IS NOT NULL AND expires_at < ?", cutoff),
+//		)
+//	// → WHERE (revoked_at IS NOT NULL AND revoked_at < ? OR expires_at IS NOT NULL AND expires_at < ?)
+func (b *SelectBuilder) WhereOr(conds ...Condition) *SelectBuilder {
+	if wc, ok := whereOrClause(conds); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 
@@ -332,6 +384,15 @@ func (b *CountBuilder) WhereIn(column string, values ...any) *CountBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereOr adds conditions grouped with OR.
+// See SelectBuilder.WhereOr for details.
+func (b *CountBuilder) WhereOr(conds ...Condition) *CountBuilder {
+	if wc, ok := whereOrClause(conds); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 
@@ -623,6 +684,15 @@ func (b *UpdateBuilder) WhereIn(column string, values ...any) *UpdateBuilder {
 	return b
 }
 
+// WhereOr adds conditions grouped with OR.
+// See SelectBuilder.WhereOr for details.
+func (b *UpdateBuilder) WhereOr(conds ...Condition) *UpdateBuilder {
+	if wc, ok := whereOrClause(conds); ok {
+		b.wheres = append(b.wheres, wc)
+	}
+	return b
+}
+
 // WhereSearch adds a multi-column contains-search condition.
 // See SelectBuilder.WhereSearch for details.
 func (b *UpdateBuilder) WhereSearch(search string, columns ...string) *UpdateBuilder {
@@ -698,6 +768,15 @@ func (b *DeleteBuilder) WhereIn(column string, values ...any) *DeleteBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereOr adds conditions grouped with OR.
+// See SelectBuilder.WhereOr for details.
+func (b *DeleteBuilder) WhereOr(conds ...Condition) *DeleteBuilder {
+	if wc, ok := whereOrClause(conds); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 

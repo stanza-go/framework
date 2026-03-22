@@ -1112,3 +1112,117 @@ func TestInsertBatch_SingleColumn(t *testing.T) {
 		t.Errorf("args = %v, want %v", args, wantArgs)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WhereOr
+// ---------------------------------------------------------------------------
+
+func TestSelect_WhereOr(t *testing.T) {
+	sql, args := Select("id", "name").
+		From("api_keys").
+		WhereOr(
+			Cond("revoked_at IS NOT NULL AND revoked_at < ?", "2025-01-01"),
+			Cond("expires_at IS NOT NULL AND expires_at < ?", "2025-01-01"),
+		).
+		Build()
+
+	wantSQL := "SELECT id, name FROM api_keys WHERE (revoked_at IS NOT NULL AND revoked_at < ? OR expires_at IS NOT NULL AND expires_at < ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01", "2025-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereOrWithAnd(t *testing.T) {
+	sql, args := Select("id").
+		From("tokens").
+		Where("deleted_at IS NULL").
+		WhereOr(
+			Cond("used_at IS NOT NULL"),
+			Cond("expires_at < ?", "2025-01-01"),
+		).
+		Build()
+
+	wantSQL := "SELECT id FROM tokens WHERE deleted_at IS NULL AND (used_at IS NOT NULL OR expires_at < ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestDelete_WhereOr(t *testing.T) {
+	sql, args := Delete("api_keys").
+		WhereOr(
+			Cond("revoked_at IS NOT NULL AND revoked_at < ?", "2025-01-01"),
+			Cond("expires_at IS NOT NULL AND expires_at < ?", "2025-01-01"),
+		).
+		Build()
+
+	wantSQL := "DELETE FROM api_keys WHERE (revoked_at IS NOT NULL AND revoked_at < ? OR expires_at IS NOT NULL AND expires_at < ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01", "2025-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestWhereOr_SingleCondNoop(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		WhereOr(Cond("x = ?", 1)).
+		Build()
+
+	wantSQL := "SELECT id FROM users"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want empty", args)
+	}
+}
+
+func TestWhereOr_ThreeConditions(t *testing.T) {
+	sql, args := Update("jobs").
+		Set("status", "cancelled").
+		WhereOr(
+			Cond("status = ?", "pending"),
+			Cond("status = ?", "scheduled"),
+			Cond("status = ?", "retrying"),
+		).
+		Build()
+
+	wantSQL := "UPDATE jobs SET status = ? WHERE (status = ? OR status = ? OR status = ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"cancelled", "pending", "scheduled", "retrying"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestCount_WhereOr(t *testing.T) {
+	sql, args := Count("api_keys").
+		WhereOr(
+			Cond("revoked_at IS NOT NULL"),
+			Cond("expires_at < ?", "2025-01-01"),
+		).
+		Build()
+
+	wantSQL := "SELECT COUNT(*) FROM api_keys WHERE (revoked_at IS NOT NULL OR expires_at < ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2025-01-01"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
