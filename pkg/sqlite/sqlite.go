@@ -22,7 +22,10 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
+
+	"github.com/stanza-go/framework/pkg/log"
 )
 
 // Column types returned by SQLite.
@@ -67,14 +70,18 @@ type DB struct {
 	opts           []Option
 	migrations     []Migration
 	lastBackupPath string
+	logger         *log.Logger
+	slowThreshold  time.Duration
 }
 
 // Option configures a DB.
 type Option func(*dbConfig)
 
 type dbConfig struct {
-	busyTimeout int // milliseconds
-	pragmas     []string
+	busyTimeout   int // milliseconds
+	pragmas       []string
+	logger        *log.Logger
+	slowThreshold time.Duration
 }
 
 // WithBusyTimeout sets the busy timeout in milliseconds. The default
@@ -93,6 +100,25 @@ func WithBusyTimeout(ms int) Option {
 func WithPragma(pragma string) Option {
 	return func(c *dbConfig) {
 		c.pragmas = append(c.pragmas, pragma)
+	}
+}
+
+// WithLogger sets a logger for query instrumentation. When set, all
+// queries are logged at Debug level with their duration. Queries
+// exceeding the slow threshold are logged at Warn level. Failed
+// queries are logged at Warn level regardless of duration.
+func WithLogger(l *log.Logger) Option {
+	return func(c *dbConfig) {
+		c.logger = l
+	}
+}
+
+// WithSlowThreshold sets the duration above which queries are logged
+// at Warn level instead of Debug. The default is 200ms. Only takes
+// effect when a logger is configured via WithLogger.
+func WithSlowThreshold(d time.Duration) Option {
+	return func(c *dbConfig) {
+		c.slowThreshold = d
 	}
 }
 
@@ -134,6 +160,12 @@ func (db *DB) Start(ctx context.Context) error {
 	cfg := dbConfig{busyTimeout: 5000}
 	for _, opt := range db.opts {
 		opt(&cfg)
+	}
+
+	db.logger = cfg.logger
+	db.slowThreshold = cfg.slowThreshold
+	if db.slowThreshold == 0 && db.logger != nil {
+		db.slowThreshold = 200 * time.Millisecond
 	}
 
 	rc = C._busy_timeout(db.db, C.int(cfg.busyTimeout))
@@ -195,6 +227,8 @@ func (db *DB) Stop(ctx context.Context) error {
 // UPDATE, DELETE, CREATE, etc.). Use args to bind parameters using
 // positional placeholders (?).
 func (db *DB) Exec(sql string, args ...any) (Result, error) {
+	start := time.Now()
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -204,29 +238,37 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 
 	stmt, err := db.prepare(sql)
 	if err != nil {
+		db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 	defer C._finalize(stmt)
 
 	if err := db.bind(stmt, args); err != nil {
+		db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 
 	rc := C._step(stmt)
 	if rc != resultDone && rc != resultRow {
-		return Result{}, fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(db.db)))
+		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(db.db)))
+		db.logQuery(sql, time.Since(start), err)
+		return Result{}, err
 	}
 
-	return Result{
+	result := Result{
 		LastInsertID: int64(C._last_insert_rowid(db.db)),
 		RowsAffected: int64(C._changes(db.db)),
-	}, nil
+	}
+	db.logQuery(sql, time.Since(start), nil)
+	return result, nil
 }
 
 // Query executes a SQL statement that returns rows (SELECT). Use args
 // to bind parameters using positional placeholders (?). The caller
 // must call Rows.Close when done iterating.
 func (db *DB) Query(sql string, args ...any) (*Rows, error) {
+	start := time.Now()
+
 	db.mu.Lock()
 	// mu is held until Rows.Close is called.
 
@@ -237,19 +279,23 @@ func (db *DB) Query(sql string, args ...any) (*Rows, error) {
 
 	stmt, err := db.prepare(sql)
 	if err != nil {
+		db.logQuery(sql, time.Since(start), err)
 		db.mu.Unlock()
 		return nil, err
 	}
 
 	if err := db.bind(stmt, args); err != nil {
 		C._finalize(stmt)
+		db.logQuery(sql, time.Since(start), err)
 		db.mu.Unlock()
 		return nil, err
 	}
 
 	return &Rows{
-		db:   db,
-		stmt: stmt,
+		db:    db,
+		stmt:  stmt,
+		start: start,
+		sql:   sql,
 	}, nil
 }
 
@@ -283,6 +329,30 @@ func (db *DB) Backup(destPath string) error {
 		return fmt.Errorf("sqlite: backup: %w", err)
 	}
 	return nil
+}
+
+// logQuery logs a completed query with its duration. Normal queries
+// are logged at Debug level. Slow queries (above the configured
+// threshold) and failed queries are logged at Warn level. No-op
+// when no logger is configured.
+func (db *DB) logQuery(sql string, dur time.Duration, err error) {
+	if db.logger == nil {
+		return
+	}
+	fields := []log.Field{
+		log.String("sql", sql),
+		log.Duration("duration", dur),
+	}
+	if err != nil {
+		fields = append(fields, log.Err(err))
+		db.logger.Warn("query failed", fields...)
+		return
+	}
+	if dur >= db.slowThreshold {
+		db.logger.Warn("slow query", fields...)
+		return
+	}
+	db.logger.Debug("query", fields...)
 }
 
 // prepare compiles a SQL statement. The caller must hold db.mu.
@@ -379,7 +449,9 @@ type Result struct {
 type Rows struct {
 	db      *DB
 	stmt    *C.sqlite3_stmt
+	start   time.Time
 	cols    []string
+	sql     string
 	err     error
 	closed  bool
 	stepped bool
@@ -505,6 +577,7 @@ func (r *Rows) Close() error {
 	}
 	r.closed = true
 	C._finalize(r.stmt)
+	r.db.logQuery(r.sql, time.Since(r.start), r.err)
 	if !r.tx {
 		r.db.mu.Unlock()
 	}

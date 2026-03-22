@@ -7,6 +7,7 @@ import "C"
 
 import (
 	"fmt"
+	"time"
 )
 
 // Tx is a database transaction. It holds the database mutex for its
@@ -65,53 +66,67 @@ func (tx *Tx) Rollback() error {
 
 // Exec executes a SQL statement within the transaction.
 func (tx *Tx) Exec(sql string, args ...any) (Result, error) {
+	start := time.Now()
+
 	if tx.finished {
 		return Result{}, fmt.Errorf("sqlite: transaction already finished")
 	}
 
 	stmt, err := tx.db.prepare(sql)
 	if err != nil {
+		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 	defer C._finalize(stmt)
 
 	if err := tx.db.bind(stmt, args); err != nil {
+		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 
 	rc := C._step(stmt)
 	if rc != resultDone && rc != resultRow {
-		return Result{}, fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(tx.db.db)))
+		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(tx.db.db)))
+		tx.db.logQuery(sql, time.Since(start), err)
+		return Result{}, err
 	}
 
-	return Result{
+	result := Result{
 		LastInsertID: int64(C._last_insert_rowid(tx.db.db)),
 		RowsAffected: int64(C._changes(tx.db.db)),
-	}, nil
+	}
+	tx.db.logQuery(sql, time.Since(start), nil)
+	return result, nil
 }
 
 // Query executes a SQL query within the transaction. The caller must
 // call Rows.Close when done. Note: Rows.Close does NOT release the
 // transaction mutex — only Commit or Rollback does that.
 func (tx *Tx) Query(sql string, args ...any) (*Rows, error) {
+	start := time.Now()
+
 	if tx.finished {
 		return nil, fmt.Errorf("sqlite: transaction already finished")
 	}
 
 	stmt, err := tx.db.prepare(sql)
 	if err != nil {
+		tx.db.logQuery(sql, time.Since(start), err)
 		return nil, err
 	}
 
 	if err := tx.db.bind(stmt, args); err != nil {
 		C._finalize(stmt)
+		tx.db.logQuery(sql, time.Since(start), err)
 		return nil, err
 	}
 
 	return &Rows{
-		db:   tx.db,
-		stmt: stmt,
-		tx:   true,
+		db:    tx.db,
+		stmt:  stmt,
+		start: start,
+		sql:   sql,
+		tx:    true,
 	}, nil
 }
 
@@ -128,12 +143,15 @@ func (tx *Tx) QueryRow(sql string, args ...any) *Row {
 // ExecMany executes a SQL statement for each set of args in a batch.
 // The statement is prepared once and reused for each set of args.
 func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
+	start := time.Now()
+
 	if tx.finished {
 		return fmt.Errorf("sqlite: transaction already finished")
 	}
 
 	stmt, err := tx.db.prepare(sql)
 	if err != nil {
+		tx.db.logQuery(sql, time.Since(start), err)
 		return err
 	}
 	defer C._finalize(stmt)
@@ -143,14 +161,19 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 		C._clear_bindings(stmt)
 
 		if err := tx.db.bind(stmt, args); err != nil {
-			return fmt.Errorf("sqlite: exec batch item %d: %w", i, err)
+			err = fmt.Errorf("sqlite: exec batch item %d: %w", i, err)
+			tx.db.logQuery(sql, time.Since(start), err)
+			return err
 		}
 
 		rc := C._step(stmt)
 		if rc != resultDone && rc != resultRow {
-			return fmt.Errorf("sqlite: exec batch item %d: %s", i, C.GoString(C._errmsg(tx.db.db)))
+			err := fmt.Errorf("sqlite: exec batch item %d: %s", i, C.GoString(C._errmsg(tx.db.db)))
+			tx.db.logQuery(sql, time.Since(start), err)
+			return err
 		}
 	}
+	tx.db.logQuery(sql, time.Since(start), nil)
 	return nil
 }
 
