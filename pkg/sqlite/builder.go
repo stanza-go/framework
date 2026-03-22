@@ -164,6 +164,20 @@ func Count(table string) *CountBuilder {
 	return &CountBuilder{table: table}
 }
 
+// CountFrom creates a COUNT query reusing the table and WHERE clauses from a
+// SelectBuilder. This eliminates the need to duplicate WHERE conditions when
+// building both a SELECT and a COUNT for paginated queries. JOINs, ORDER BY,
+// LIMIT, and OFFSET are excluded — for LEFT JOINs this is correct because
+// they preserve all rows from the left table.
+func CountFrom(sb *SelectBuilder) *CountBuilder {
+	cb := &CountBuilder{table: sb.table}
+	if len(sb.wheres) > 0 {
+		cb.wheres = make([]whereClause, len(sb.wheres))
+		copy(cb.wheres, sb.wheres)
+	}
+	return cb
+}
+
 // Where adds an AND condition.
 func (b *CountBuilder) Where(cond string, args ...any) *CountBuilder {
 	b.wheres = append(b.wheres, whereClause{cond: cond, args: args})
