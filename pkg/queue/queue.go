@@ -100,6 +100,8 @@ type Queue struct {
 	cancel       context.CancelFunc
 	wg           sync.WaitGroup
 	started      bool
+	running      map[int64]context.CancelFunc // per-job cancel functions
+	killing      map[int64]bool               // jobs with pending kill signal
 }
 
 // Option configures a Queue.
@@ -195,6 +197,8 @@ func New(db *sqlite.DB, opts ...Option) *Queue {
 		pollInterval: time.Second,
 		maxAttempts:  3,
 		retryDelay:   30 * time.Second,
+		running:      make(map[int64]context.CancelFunc),
+		killing:      make(map[int64]bool),
 	}
 	for _, opt := range opts {
 		opt(q)
@@ -506,8 +510,13 @@ func (q *Queue) Retry(id int64) error {
 	return nil
 }
 
-// Cancel cancels a pending job. Only pending jobs can be cancelled.
+// Cancel cancels a pending or running job. Pending jobs are cancelled
+// immediately by updating their status. Running jobs receive a context
+// cancellation signal — the handler should check ctx.Done() to detect
+// this and return early. The job is marked as cancelled once the handler
+// returns.
 func (q *Queue) Cancel(id int64) error {
+	// Try cancelling a pending job first (immediate, no context needed).
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := q.db.Exec(
 		`UPDATE _queue_jobs SET status = ?, updated_at = ? WHERE id = ? AND status = ?`,
@@ -516,11 +525,25 @@ func (q *Queue) Cancel(id int64) error {
 	if err != nil {
 		return fmt.Errorf("queue: cancel: %w", err)
 	}
-	if res.RowsAffected == 0 {
-		return fmt.Errorf("queue: cancel: job %d not found or not pending", id)
+	if res.RowsAffected > 0 {
+		q.logInfo("job cancelled", log.Int64("id", id))
+		return nil
 	}
 
-	q.logInfo("job cancelled", log.Int64("id", id))
+	// Not pending — try killing a running job via context cancellation.
+	q.mu.Lock()
+	cancelFn, ok := q.running[id]
+	if ok {
+		q.killing[id] = true
+	}
+	q.mu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("queue: cancel: job %d not found or not in pending/running state", id)
+	}
+
+	cancelFn()
+	q.logInfo("job kill signal sent", log.Int64("id", id))
 	return nil
 }
 
@@ -572,15 +595,44 @@ func (q *Queue) poll(ctx context.Context, workerID int) {
 	handler, exists := q.handlers[job.Type]
 	q.mu.Unlock()
 
-	start := time.Now()
-
 	if !exists {
 		q.fail(job, fmt.Errorf("no handler registered for job type %q", job.Type))
 		return
 	}
 
-	err := q.safeHandle(ctx, handler, job.Payload)
+	// Create a per-job context so running jobs can be cancelled
+	// individually via Cancel(id).
+	jobCtx, jobCancel := context.WithCancel(ctx)
+
+	q.mu.Lock()
+	q.running[job.ID] = jobCancel
+	q.mu.Unlock()
+
+	start := time.Now()
+	err := q.safeHandle(jobCtx, handler, job.Payload)
 	elapsed := time.Since(start)
+
+	// Clean up running state and check if a kill was requested.
+	q.mu.Lock()
+	delete(q.running, job.ID)
+	killed := q.killing[job.ID]
+	delete(q.killing, job.ID)
+	q.mu.Unlock()
+	jobCancel()
+
+	// If a kill signal was sent and the handler returned an error
+	// (typically context.Canceled), mark as cancelled rather than
+	// failed/dead. If the handler completed successfully despite the
+	// kill signal, honor the successful result.
+	if killed && err != nil {
+		q.markCancelled(job)
+		q.logInfo("job killed",
+			log.Int64("id", job.ID),
+			log.String("type", job.Type),
+			log.Duration("elapsed", elapsed),
+		)
+		return
+	}
 
 	if err != nil {
 		q.logError("job failed",
@@ -656,6 +708,15 @@ func (q *Queue) claim() (Job, bool) {
 	j.UpdatedAt = parseTime(now)
 
 	return j, true
+}
+
+// markCancelled marks a running job as cancelled after a kill signal.
+func (q *Queue) markCancelled(j Job) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, _ = q.db.Exec(
+		`UPDATE _queue_jobs SET status = ?, completed_at = ?, updated_at = ? WHERE id = ?`,
+		StatusCancelled, now, now, j.ID,
+	)
 }
 
 // complete marks a job as successfully completed.
