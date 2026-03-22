@@ -3,11 +3,15 @@
 // handler functions. Failed jobs are retried with configurable backoff, and
 // permanently failed jobs are moved to a dead-letter state.
 //
+// Jobs can have a maximum execution time. If a handler exceeds its timeout,
+// the context is cancelled and the job fails with a timeout error. Set a
+// default timeout with WithDefaultTimeout or override per-job with Timeout.
+//
 // Basic usage:
 //
-//	q := queue.New(db)
+//	q := queue.New(db, queue.WithDefaultTimeout(5 * time.Minute))
 //	q.Register("send_email", func(ctx context.Context, payload []byte) error {
-//	    // process the job
+//	    // process the job — check ctx.Done() for timeout/cancellation
 //	    return nil
 //	})
 //
@@ -22,4 +26,5 @@
 //
 //	id, err := q.Enqueue(ctx, "send_email", []byte(`{"to":"user@example.com"}`))
 //	id, err := q.Enqueue(ctx, "report", payload, queue.Delay(time.Hour))
+//	id, err := q.Enqueue(ctx, "import", payload, queue.Timeout(30 * time.Minute))
 package queue

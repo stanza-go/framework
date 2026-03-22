@@ -35,6 +35,7 @@ type Job struct {
 	Status      string
 	Attempts    int
 	MaxAttempts int
+	Timeout     time.Duration // 0 means no timeout
 	LastError   string
 	RunAt       time.Time
 	StartedAt   time.Time
@@ -64,20 +65,21 @@ type Filter struct {
 
 // Queue is a SQLite-backed job queue with in-process workers.
 type Queue struct {
-	db           *sqlite.DB
-	handlers     map[string]HandlerFunc
-	mu           sync.Mutex
-	workers      int
-	pollInterval time.Duration
-	maxAttempts  int
-	retryDelay   time.Duration
-	logger       *log.Logger
-	ctx          context.Context
-	cancel       context.CancelFunc
-	wg           sync.WaitGroup
-	started      bool
-	running      map[int64]context.CancelFunc // per-job cancel functions
-	killing      map[int64]bool               // jobs with pending kill signal
+	db             *sqlite.DB
+	handlers       map[string]HandlerFunc
+	mu             sync.Mutex
+	workers        int
+	pollInterval   time.Duration
+	maxAttempts    int
+	retryDelay     time.Duration
+	defaultTimeout time.Duration
+	logger         *log.Logger
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	started        bool
+	running        map[int64]context.CancelFunc // per-job cancel functions
+	killing        map[int64]bool               // jobs with pending kill signal
 }
 
 // Option configures a Queue.
@@ -130,6 +132,19 @@ func WithRetryDelay(d time.Duration) Option {
 	}
 }
 
+// WithDefaultTimeout sets the default maximum execution time for jobs. If a
+// handler does not complete within the timeout, its context is cancelled and
+// the job is marked as failed with a timeout error. A value of 0 means no
+// timeout (the default). Per-job timeouts set via the Timeout enqueue option
+// take precedence.
+func WithDefaultTimeout(d time.Duration) Option {
+	return func(q *Queue) {
+		if d >= 0 {
+			q.defaultTimeout = d
+		}
+	}
+}
+
 // EnqueueOption configures a single enqueue call.
 type EnqueueOption func(*enqueueConfig)
 
@@ -137,6 +152,8 @@ type enqueueConfig struct {
 	queue       string
 	delay       time.Duration
 	maxAttempts int
+	timeout     time.Duration
+	timeoutSet  bool
 }
 
 // Delay postpones job execution by the given duration.
@@ -152,6 +169,17 @@ func MaxAttempts(n int) EnqueueOption {
 		if n > 0 {
 			c.maxAttempts = n
 		}
+	}
+}
+
+// Timeout overrides the default timeout for this job. If the handler does not
+// complete within the timeout, its context is cancelled and the job fails with
+// a timeout error. A value of 0 explicitly disables the timeout for this job
+// even if a default timeout is configured.
+func Timeout(d time.Duration) EnqueueOption {
+	return func(c *enqueueConfig) {
+		c.timeout = d
+		c.timeoutSet = true
 	}
 }
 
@@ -210,13 +238,21 @@ func (q *Queue) Enqueue(_ context.Context, jobType string, payload []byte, opts 
 		runAt = now.Add(cfg.delay)
 	}
 
+	// Resolve timeout: per-job option takes precedence over queue default.
+	timeoutSec := 0
+	if cfg.timeoutSet {
+		timeoutSec = int(cfg.timeout.Seconds())
+	} else if q.defaultTimeout > 0 {
+		timeoutSec = int(q.defaultTimeout.Seconds())
+	}
+
 	nowStr := now.Format(time.RFC3339)
 	runAtStr := runAt.Format(time.RFC3339)
 
 	res, err := q.db.Exec(
-		`INSERT INTO _queue_jobs (queue, type, payload, status, attempts, max_attempts, run_at, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?)`,
-		cfg.queue, jobType, string(payload), StatusPending, cfg.maxAttempts, runAtStr, nowStr, nowStr,
+		`INSERT INTO _queue_jobs (queue, type, payload, status, attempts, max_attempts, timeout_seconds, run_at, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+		cfg.queue, jobType, string(payload), StatusPending, cfg.maxAttempts, timeoutSec, runAtStr, nowStr, nowStr,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("queue: enqueue: %w", err)
@@ -342,15 +378,17 @@ func (q *Queue) Stats() (Stats, error) {
 func (q *Queue) Job(id int64) (Job, error) {
 	var j Job
 	var payload, lastError, runAt, startedAt, completedAt, createdAt, updatedAt string
+	var timeoutSec int
 
 	err := q.db.QueryRow(
 		`SELECT id, queue, type, payload, status, attempts, max_attempts,
-		        COALESCE(last_error, ''), run_at, COALESCE(started_at, ''),
-		        COALESCE(completed_at, ''), created_at, updated_at
+		        timeout_seconds, COALESCE(last_error, ''), run_at,
+		        COALESCE(started_at, ''), COALESCE(completed_at, ''),
+		        created_at, updated_at
 		 FROM _queue_jobs WHERE id = ?`, id,
 	).Scan(&j.ID, &j.Queue, &j.Type, &payload, &j.Status, &j.Attempts,
-		&j.MaxAttempts, &lastError, &runAt, &startedAt, &completedAt,
-		&createdAt, &updatedAt)
+		&j.MaxAttempts, &timeoutSec, &lastError, &runAt, &startedAt,
+		&completedAt, &createdAt, &updatedAt)
 
 	if errors.Is(err, sqlite.ErrNoRows) {
 		return j, fmt.Errorf("queue: job %d not found", id)
@@ -360,6 +398,7 @@ func (q *Queue) Job(id int64) (Job, error) {
 	}
 
 	j.Payload = []byte(payload)
+	j.Timeout = time.Duration(timeoutSec) * time.Second
 	j.LastError = lastError
 	j.RunAt = parseTime(runAt)
 	j.StartedAt = parseTime(startedAt)
@@ -403,8 +442,9 @@ func (q *Queue) Jobs(f Filter) ([]Job, error) {
 	var sb strings.Builder
 	var args []any
 	sb.WriteString(`SELECT id, queue, type, payload, status, attempts, max_attempts,
-	                 COALESCE(last_error, ''), run_at, COALESCE(started_at, ''),
-	                 COALESCE(completed_at, ''), created_at, updated_at
+	                 timeout_seconds, COALESCE(last_error, ''), run_at,
+	                 COALESCE(started_at, ''), COALESCE(completed_at, ''),
+	                 created_at, updated_at
 	          FROM _queue_jobs WHERE 1=1`)
 
 	if f.Queue != "" {
@@ -443,12 +483,14 @@ func (q *Queue) Jobs(f Filter) ([]Job, error) {
 	for rows.Next() {
 		var j Job
 		var payload, lastError, runAt, startedAt, completedAt, createdAt, updatedAt string
+		var timeoutSec int
 		if err := rows.Scan(&j.ID, &j.Queue, &j.Type, &payload, &j.Status,
-			&j.Attempts, &j.MaxAttempts, &lastError, &runAt, &startedAt,
-			&completedAt, &createdAt, &updatedAt); err != nil {
+			&j.Attempts, &j.MaxAttempts, &timeoutSec, &lastError, &runAt,
+			&startedAt, &completedAt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("queue: jobs scan: %w", err)
 		}
 		j.Payload = []byte(payload)
+		j.Timeout = time.Duration(timeoutSec) * time.Second
 		j.LastError = lastError
 		j.RunAt = parseTime(runAt)
 		j.StartedAt = parseTime(startedAt)
@@ -577,8 +619,15 @@ func (q *Queue) poll(ctx context.Context, workerID int) {
 	}
 
 	// Create a per-job context so running jobs can be cancelled
-	// individually via Cancel(id).
-	jobCtx, jobCancel := context.WithCancel(ctx)
+	// individually via Cancel(id). If the job has a timeout, also
+	// set a deadline so the handler's context expires automatically.
+	var jobCtx context.Context
+	var jobCancel context.CancelFunc
+	if job.Timeout > 0 {
+		jobCtx, jobCancel = context.WithTimeout(ctx, job.Timeout)
+	} else {
+		jobCtx, jobCancel = context.WithCancel(ctx)
+	}
 
 	q.mu.Lock()
 	q.running[job.ID] = jobCancel
@@ -608,6 +657,12 @@ func (q *Queue) poll(ctx context.Context, workerID int) {
 			log.Duration("elapsed", elapsed),
 		)
 		return
+	}
+
+	// Detect timeout: if the job had a timeout and the context deadline
+	// was exceeded, wrap the error for clarity.
+	if err != nil && job.Timeout > 0 && errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("job timed out after %s: %w", job.Timeout, err)
 	}
 
 	if err != nil {
@@ -647,11 +702,12 @@ func (q *Queue) claim() (Job, bool) {
 
 	var j Job
 	var payload, runAt, createdAt, updatedAt string
+	var timeoutSec int
 
 	// Use a transaction to atomically select and update.
 	err := q.db.InTx(func(tx *sqlite.Tx) error {
 		row := tx.QueryRow(
-			`SELECT id, queue, type, payload, attempts, max_attempts, run_at, created_at, updated_at
+			`SELECT id, queue, type, payload, attempts, max_attempts, timeout_seconds, run_at, created_at, updated_at
 			 FROM _queue_jobs
 			 WHERE status = ? AND run_at <= ?
 			 ORDER BY run_at ASC
@@ -659,7 +715,7 @@ func (q *Queue) claim() (Job, bool) {
 			StatusPending, now,
 		)
 		if err := row.Scan(&j.ID, &j.Queue, &j.Type, &payload, &j.Attempts,
-			&j.MaxAttempts, &runAt, &createdAt, &updatedAt); err != nil {
+			&j.MaxAttempts, &timeoutSec, &runAt, &createdAt, &updatedAt); err != nil {
 			return err
 		}
 
@@ -678,6 +734,7 @@ func (q *Queue) claim() (Job, bool) {
 
 	j.Status = StatusRunning
 	j.Payload = []byte(payload)
+	j.Timeout = time.Duration(timeoutSec) * time.Second
 	j.RunAt = parseTime(runAt)
 	j.StartedAt = parseTime(now)
 	j.CreatedAt = parseTime(createdAt)
@@ -743,23 +800,31 @@ func (q *Queue) fail(j Job, jobErr error) {
 // createTable ensures the _queue_jobs table exists.
 func (q *Queue) createTable() error {
 	_, err := q.db.Exec(`CREATE TABLE IF NOT EXISTS _queue_jobs (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		queue       TEXT    NOT NULL DEFAULT 'default',
-		type        TEXT    NOT NULL,
-		payload     TEXT    NOT NULL DEFAULT '{}',
-		status      TEXT    NOT NULL DEFAULT 'pending',
-		attempts    INTEGER NOT NULL DEFAULT 0,
-		max_attempts INTEGER NOT NULL DEFAULT 3,
-		last_error  TEXT,
-		run_at      TEXT    NOT NULL,
-		started_at  TEXT,
-		completed_at TEXT,
-		created_at  TEXT    NOT NULL,
-		updated_at  TEXT    NOT NULL
+		id              INTEGER PRIMARY KEY AUTOINCREMENT,
+		queue           TEXT    NOT NULL DEFAULT 'default',
+		type            TEXT    NOT NULL,
+		payload         TEXT    NOT NULL DEFAULT '{}',
+		status          TEXT    NOT NULL DEFAULT 'pending',
+		attempts        INTEGER NOT NULL DEFAULT 0,
+		max_attempts    INTEGER NOT NULL DEFAULT 3,
+		timeout_seconds INTEGER NOT NULL DEFAULT 0,
+		last_error      TEXT,
+		run_at          TEXT    NOT NULL,
+		started_at      TEXT,
+		completed_at    TEXT,
+		created_at      TEXT    NOT NULL,
+		updated_at      TEXT    NOT NULL
 	)`)
 	if err != nil {
 		return fmt.Errorf("queue: create table: %w", err)
 	}
+
+	// Add timeout_seconds column for existing databases. SQLite ignores
+	// ALTER TABLE ADD COLUMN if the column already exists in the CREATE
+	// above, so we attempt it and ignore the "duplicate column" error.
+	_, _ = q.db.Exec(
+		`ALTER TABLE _queue_jobs ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0`,
+	)
 
 	_, err = q.db.Exec(
 		`CREATE INDEX IF NOT EXISTS idx_queue_jobs_dequeue
