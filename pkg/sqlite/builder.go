@@ -52,6 +52,28 @@ func inPlaceholders(n int) string {
 	return sb.String()
 }
 
+// whereSearchClause builds a parenthesized multi-column LIKE condition for
+// contains-search. Returns false if search is empty or no columns provided.
+func whereSearchClause(search string, columns []string) (whereClause, bool) {
+	if search == "" || len(columns) == 0 {
+		return whereClause{}, false
+	}
+	like := "%" + EscapeLike(search) + "%"
+	var sb strings.Builder
+	args := make([]any, 0, len(columns))
+	sb.WriteByte('(')
+	for i, col := range columns {
+		if i > 0 {
+			sb.WriteString(" OR ")
+		}
+		sb.WriteString(col)
+		sb.WriteString(" LIKE ? ESCAPE '\\'")
+		args = append(args, like)
+	}
+	sb.WriteByte(')')
+	return whereClause{cond: sb.String(), args: args}, true
+}
+
 // appendWheres writes WHERE clauses to the builder and collects arguments.
 func appendWheres(sb *strings.Builder, wheres []whereClause, args []any) []any {
 	if len(wheres) == 0 {
@@ -128,6 +150,21 @@ func (b *SelectBuilder) WhereIn(column string, values ...any) *SelectBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereSearch adds a multi-column contains-search condition. The search term
+// is escaped with EscapeLike and wrapped in % for contains matching. Multiple
+// columns are OR'd together and the whole condition is parenthesized so it
+// composes correctly with other AND conditions. If search is empty or no
+// columns are provided, this is a no-op.
+//
+//	q.Where("deleted_at IS NULL").WhereSearch("john", "email", "name")
+//	// → WHERE deleted_at IS NULL AND (email LIKE '%john%' ESCAPE '\' OR name LIKE '%john%' ESCAPE '\')
+func (b *SelectBuilder) WhereSearch(search string, columns ...string) *SelectBuilder {
+	if wc, ok := whereSearchClause(search, columns); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 
@@ -295,6 +332,15 @@ func (b *CountBuilder) WhereIn(column string, values ...any) *CountBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereSearch adds a multi-column contains-search condition.
+// See SelectBuilder.WhereSearch for details.
+func (b *CountBuilder) WhereSearch(search string, columns ...string) *CountBuilder {
+	if wc, ok := whereSearchClause(search, columns); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 
@@ -475,6 +521,15 @@ func (b *UpdateBuilder) WhereIn(column string, values ...any) *UpdateBuilder {
 	return b
 }
 
+// WhereSearch adds a multi-column contains-search condition.
+// See SelectBuilder.WhereSearch for details.
+func (b *UpdateBuilder) WhereSearch(search string, columns ...string) *UpdateBuilder {
+	if wc, ok := whereSearchClause(search, columns); ok {
+		b.wheres = append(b.wheres, wc)
+	}
+	return b
+}
+
 // Build produces the SQL string and argument slice.
 // SET arguments come before WHERE arguments in the returned slice.
 func (b *UpdateBuilder) Build() (string, []any) {
@@ -541,6 +596,15 @@ func (b *DeleteBuilder) WhereIn(column string, values ...any) *DeleteBuilder {
 		cond: column + " IN " + inPlaceholders(len(values)),
 		args: values,
 	})
+	return b
+}
+
+// WhereSearch adds a multi-column contains-search condition.
+// See SelectBuilder.WhereSearch for details.
+func (b *DeleteBuilder) WhereSearch(search string, columns ...string) *DeleteBuilder {
+	if wc, ok := whereSearchClause(search, columns); ok {
+		b.wheres = append(b.wheres, wc)
+	}
 	return b
 }
 
