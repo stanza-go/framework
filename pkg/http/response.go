@@ -17,8 +17,9 @@ const (
 	StatusNotFound            = 404
 	StatusMethodNotAllowed    = 405
 	StatusConflict            = 409
-	StatusUnprocessableEntity = 422
-	StatusTooManyRequests     = 429
+	StatusRequestEntityTooLarge = 413
+	StatusUnprocessableEntity   = 422
+	StatusTooManyRequests       = 429
 	StatusInternalServerError = 500
 	StatusServiceUnavailable  = 503
 )

@@ -13,6 +13,28 @@ import (
 	"github.com/stanza-go/framework/pkg/log"
 )
 
+// MaxBody returns middleware that limits the size of request bodies.
+// When a handler reads beyond the limit, the read returns an error
+// and the server closes the connection. Multipart requests (file
+// uploads) are exempt — they should enforce their own limits via
+// net/http.MaxBytesReader in the handler.
+//
+// A typical global limit of 2 MB protects JSON endpoints from abuse
+// while leaving upload endpoints free to set their own limits:
+//
+//	r.Use(http.MaxBody(2 << 20))
+func MaxBody(limit int64) Middleware {
+	return func(next Handler) Handler {
+		return HandlerFunc(func(w ResponseWriter, r *Request) {
+			ct := r.Header.Get("Content-Type")
+			if !strings.HasPrefix(ct, "multipart/") {
+				r.Body = nethttp.MaxBytesReader(w, r.Body, limit)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // Recovery returns middleware that recovers from panics in handlers.
 // If a panic occurs, it writes a 500 JSON error response. If onPanic
 // is non-nil, it is called with the recovered value and the stack

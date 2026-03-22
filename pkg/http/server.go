@@ -56,6 +56,15 @@ func WithIdleTimeout(d time.Duration) ServerOption {
 	}
 }
 
+// WithMaxHeaderBytes sets the maximum size of request headers in
+// bytes. The default is 1 MB (Go's http.DefaultMaxHeaderBytes).
+// This prevents clients from sending excessively large headers.
+func WithMaxHeaderBytes(n int) ServerOption {
+	return func(s *nethttp.Server) {
+		s.MaxHeaderBytes = n
+	}
+}
+
 // NewServer creates a new Server with the given handler and options.
 // Sensible defaults are applied: 15s read/write timeouts, 60s idle
 // timeout, and ":8080" listen address.

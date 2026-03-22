@@ -2,10 +2,16 @@ package http
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
+	nethttp "net/http"
 	"strconv"
 	"strings"
 )
+
+// ErrBodyTooLarge is returned by ReadJSON and ReadJSONLimit when the
+// request body exceeds the configured size limit.
+var ErrBodyTooLarge = errors.New("http: request body too large")
 
 const maxBodySize int64 = 1 << 20 // 1 MB
 
@@ -89,8 +95,43 @@ func ReadJSON(r *Request, v any) error {
 }
 
 // ReadJSONLimit decodes the JSON request body into v with a custom
-// size limit in bytes.
+// size limit in bytes. If the body exceeds the limit, ErrBodyTooLarge
+// is returned.
 func ReadJSONLimit(r *Request, v any, maxBytes int64) error {
-	body := io.LimitReader(r.Body, maxBytes)
-	return json.NewDecoder(body).Decode(v)
+	lr := &bodyLimitReader{r: r.Body, n: maxBytes}
+	err := json.NewDecoder(lr).Decode(v)
+	if err != nil {
+		// MaxBody middleware wraps the body with MaxBytesReader. If
+		// the middleware's limit is hit before ours, detect it.
+		var maxErr *nethttp.MaxBytesError
+		if errors.As(err, &maxErr) {
+			return ErrBodyTooLarge
+		}
+		if errors.Is(err, ErrBodyTooLarge) {
+			return ErrBodyTooLarge
+		}
+		return err
+	}
+	return nil
+}
+
+// bodyLimitReader wraps an io.Reader with a byte limit. Unlike
+// io.LimitReader, it returns ErrBodyTooLarge instead of io.EOF when
+// the limit is reached, giving callers a clear signal that the body
+// was too large rather than simply exhausted.
+type bodyLimitReader struct {
+	r io.Reader
+	n int64
+}
+
+func (lr *bodyLimitReader) Read(p []byte) (int, error) {
+	if lr.n <= 0 {
+		return 0, ErrBodyTooLarge
+	}
+	if int64(len(p)) > lr.n {
+		p = p[:lr.n]
+	}
+	n, err := lr.r.Read(p)
+	lr.n -= int64(n)
+	return n, err
 }
