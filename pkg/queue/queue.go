@@ -351,6 +351,9 @@ func (q *Queue) Stats() (Stats, error) {
 			s.Cancelled = count
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return s, fmt.Errorf("queue: stats rows: %w", err)
+	}
 	return s, nil
 }
 
@@ -470,6 +473,9 @@ func (q *Queue) Jobs(f Filter) ([]Job, error) {
 		j.CreatedAt = parseTime(createdAt)
 		j.UpdatedAt = parseTime(updatedAt)
 		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: jobs rows: %w", err)
 	}
 
 	return jobs, nil

@@ -142,6 +142,9 @@ func (db *DB) appliedVersions() (map[int64]bool, error) {
 		}
 		applied[v] = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return applied, nil
 }
 
@@ -214,7 +217,7 @@ func (db *DB) backupBeforeMigrate() error {
 	defer dst.Close()
 
 	if _, err := io.Copy(dst, src); err != nil {
-		os.Remove(backupPath)
+		_ = os.Remove(backupPath)
 		return err
 	}
 

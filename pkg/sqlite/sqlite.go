@@ -362,6 +362,7 @@ type Rows struct {
 	closed  bool
 	stepped bool
 	hasRow  bool
+	err     error
 	tx      bool // true when rows belong to a transaction
 }
 
@@ -378,7 +379,17 @@ func (r *Rows) Next() bool {
 		return true
 	}
 	r.hasRow = false
+	if rc != resultDone {
+		r.err = fmt.Errorf("sqlite: step: %s", C.GoString(C._errmsg(r.db.db)))
+	}
 	return false
+}
+
+// Err returns the error, if any, that was encountered during iteration.
+// Err should be called after Next returns false to check whether
+// iteration stopped due to an error or normal completion.
+func (r *Rows) Err() error {
+	return r.err
 }
 
 // Scan reads the current row's columns into the provided dest pointers.
