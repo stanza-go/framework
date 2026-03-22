@@ -2,7 +2,6 @@ package sqlite
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -188,36 +187,23 @@ func (db *DB) findMigration(version int64) (Migration, bool) {
 	return Migration{}, false
 }
 
-// backupBeforeMigrate copies the database file to a temporary directory.
-// Skipped for in-memory databases. The backup path is printed to stderr
-// for visibility.
+// backupBeforeMigrate creates a backup of the database in a temporary
+// directory using VACUUM INTO. Skipped for in-memory databases.
 func (db *DB) backupBeforeMigrate() error {
 	if db.path == ":memory:" || db.path == "" {
 		return nil
 	}
 
-	src, err := os.Open(db.path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil // new database, nothing to back up
-		}
-		return err
+	if _, err := os.Stat(db.path); os.IsNotExist(err) {
+		return nil // new database, nothing to back up
 	}
-	defer src.Close()
 
 	base := filepath.Base(db.path)
 	ts := time.Now().UTC().Format("20060102T150405Z")
 	backupName := fmt.Sprintf("%s.%s.bak", base, ts)
 	backupPath := filepath.Join(os.TempDir(), backupName)
 
-	dst, err := os.Create(backupPath)
-	if err != nil {
-		return err
-	}
-	defer dst.Close()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		_ = os.Remove(backupPath)
+	if err := db.Backup(backupPath); err != nil {
 		return err
 	}
 

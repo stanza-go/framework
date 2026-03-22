@@ -20,6 +20,7 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"os"
 	"sync"
 	"unsafe"
 )
@@ -265,6 +266,23 @@ func (db *DB) QueryRow(sql string, args ...any) *Row {
 // Path returns the database file path.
 func (db *DB) Path() string {
 	return db.path
+}
+
+// Backup creates a complete, consistent copy of the database at destPath
+// using VACUUM INTO. Unlike a raw file copy, this includes all WAL data
+// and produces a compacted, defragmented database file. Safe to call
+// while the database is in use. If destPath already exists, it is
+// removed before creating the backup.
+func (db *DB) Backup(destPath string) error {
+	// VACUUM INTO refuses to overwrite — remove any existing file.
+	if err := os.Remove(destPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("sqlite: backup: remove existing: %w", err)
+	}
+	_, err := db.Exec("VACUUM INTO ?", destPath)
+	if err != nil {
+		return fmt.Errorf("sqlite: backup: %w", err)
+	}
+	return nil
 }
 
 // prepare compiles a SQL statement. The caller must hold db.mu.
