@@ -565,6 +565,14 @@ func (db *DB) Stats() DBStats {
 	return s
 }
 
+// Now returns the current UTC time formatted as an RFC 3339 string.
+// Use this when storing timestamps in SQLite columns — it produces
+// the canonical format used throughout the application for created_at,
+// updated_at, deleted_at, and similar fields.
+func Now() string {
+	return time.Now().UTC().Format(time.RFC3339)
+}
+
 // Optimize runs PRAGMA optimize, which analyzes tables that the query
 // planner has identified as needing updated statistics. Call this before
 // closing a long-running database connection — it keeps the query
