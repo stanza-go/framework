@@ -97,6 +97,7 @@ func (tx *Tx) Exec(sql string, args ...any) (Result, error) {
 		LastInsertID: int64(C._last_insert_rowid(conn)),
 		RowsAffected: int64(C._changes(conn)),
 	}
+	tx.db.totalWrites.Add(1)
 	tx.db.logQuery(sql, time.Since(start), nil)
 	return result, nil
 }
@@ -125,6 +126,7 @@ func (tx *Tx) Query(sql string, args ...any) (*Rows, error) {
 		return nil, err
 	}
 
+	tx.db.totalReads.Add(1)
 	return &Rows{
 		db:   tx.db,
 		conn: conn,
@@ -179,6 +181,7 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 			return err
 		}
 	}
+	tx.db.totalWrites.Add(int64(len(argSets)))
 	tx.db.logQuery(sql, time.Since(start), nil)
 	return nil
 }

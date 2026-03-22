@@ -52,6 +52,27 @@ const (
 	openNoMutex   = C.SQLITE_OPEN_NOMUTEX
 )
 
+// DBStats holds connection pool and query statistics. Use DB.Stats to
+// obtain a snapshot.
+type DBStats struct {
+	// ReadPoolSize is the configured number of read connections.
+	ReadPoolSize int `json:"read_pool_size"`
+	// ReadPoolAvailable is the number of idle connections in the pool.
+	ReadPoolAvailable int `json:"read_pool_available"`
+	// ReadPoolInUse is the number of connections currently checked out.
+	ReadPoolInUse int `json:"read_pool_in_use"`
+	// TotalReads is the total number of read queries executed.
+	TotalReads int64 `json:"total_reads"`
+	// TotalWrites is the total number of write operations executed.
+	TotalWrites int64 `json:"total_writes"`
+	// PoolWaits is the number of times a read query had to wait for
+	// a free connection because all pool connections were in use.
+	PoolWaits int64 `json:"pool_waits"`
+	// PoolWaitTime is the cumulative time spent waiting for a free
+	// connection from the read pool.
+	PoolWaitTime time.Duration `json:"pool_wait_time"`
+}
+
 // DB is a SQLite database connection with read/write separation. Write
 // operations (Exec, transactions) use a dedicated write connection,
 // while read operations (Query, QueryRow) use a pool of read
@@ -76,6 +97,10 @@ type DB struct {
 	poolDone       chan struct{}    // closed on Stop to unblock pool waiters
 	poolWg         sync.WaitGroup  // tracks connections checked out from pool
 	poolStopping   atomic.Bool     // true after poolDone is closed
+	totalReads     atomic.Int64    // total read queries executed
+	totalWrites    atomic.Int64    // total write operations executed
+	poolWaits      atomic.Int64    // times a read query waited for a free connection
+	poolWaitNs     atomic.Int64    // cumulative nanoseconds spent waiting for pool
 	path           string
 	opts           []Option
 	migrations     []Migration
@@ -350,6 +375,7 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 		LastInsertID: int64(C._last_insert_rowid(db.db)),
 		RowsAffected: int64(C._changes(db.db)),
 	}
+	db.totalWrites.Add(1)
 	db.logQuery(sql, time.Since(start), nil)
 	return result, nil
 }
@@ -383,12 +409,21 @@ func (db *DB) queryPool(sql string, args []any) (*Rows, error) {
 	// tracking it.
 	db.poolWg.Add(1)
 
+	// Try non-blocking first to detect pool exhaustion.
 	var conn *C.sqlite3
 	select {
 	case conn = <-db.readPool:
-	case <-db.poolDone:
-		db.poolWg.Done()
-		return nil, fmt.Errorf("sqlite: database is shutting down")
+	default:
+		// All connections busy — record a pool wait.
+		db.poolWaits.Add(1)
+		waitStart := time.Now()
+		select {
+		case conn = <-db.readPool:
+		case <-db.poolDone:
+			db.poolWg.Done()
+			return nil, fmt.Errorf("sqlite: database is shutting down")
+		}
+		db.poolWaitNs.Add(int64(time.Since(waitStart)))
 	}
 
 	stmt, err := db.prepare(conn, sql)
@@ -405,6 +440,7 @@ func (db *DB) queryPool(sql string, args []any) (*Rows, error) {
 		return nil, err
 	}
 
+	db.totalReads.Add(1)
 	return &Rows{
 		db:    db,
 		conn:  conn,
@@ -459,6 +495,7 @@ func (db *DB) queryMu(mu *sync.Mutex, conn *C.sqlite3, sql string, args []any) (
 		return nil, err
 	}
 
+	db.totalReads.Add(1)
 	return &Rows{
 		db:    db,
 		conn:  conn,
@@ -482,6 +519,25 @@ func (db *DB) QueryRow(sql string, args ...any) *Row {
 // Path returns the database file path.
 func (db *DB) Path() string {
 	return db.path
+}
+
+// Stats returns a snapshot of connection pool and query statistics.
+// The counters are cumulative since the database was opened. Pool
+// availability is a point-in-time snapshot and may change immediately
+// after the call returns.
+func (db *DB) Stats() DBStats {
+	s := DBStats{
+		TotalReads:  db.totalReads.Load(),
+		TotalWrites: db.totalWrites.Load(),
+		PoolWaits:   db.poolWaits.Load(),
+		PoolWaitTime: time.Duration(db.poolWaitNs.Load()),
+	}
+	if db.readPool != nil {
+		s.ReadPoolSize = cap(db.readPool)
+		s.ReadPoolAvailable = len(db.readPool)
+		s.ReadPoolInUse = s.ReadPoolSize - s.ReadPoolAvailable
+	}
+	return s
 }
 
 // Backup creates a complete, consistent copy of the database at destPath
