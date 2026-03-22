@@ -29,6 +29,7 @@ package validate
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 )
@@ -146,6 +147,23 @@ func Email(field, value string) *FieldError {
 	dot := strings.LastIndex(domain, ".")
 	if dot == len(domain)-1 {
 		return &FieldError{Field: field, Message: "must be a valid email address"}
+	}
+	return nil
+}
+
+// URL checks that a string value is a valid HTTP or HTTPS URL. It verifies
+// the scheme is http or https, the URL is parseable, and it has a host.
+// An empty value is considered valid — use Required to enforce presence.
+func URL(field, value string) *FieldError {
+	if value == "" {
+		return nil
+	}
+	if !strings.HasPrefix(value, "http://") && !strings.HasPrefix(value, "https://") {
+		return &FieldError{Field: field, Message: "must be a valid URL"}
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Host == "" {
+		return &FieldError{Field: field, Message: "must be a valid URL"}
 	}
 	return nil
 }
