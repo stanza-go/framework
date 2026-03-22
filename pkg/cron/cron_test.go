@@ -811,3 +811,215 @@ func TestOnComplete_Error(t *testing.T) {
 		t.Errorf("err = %v, want %v", r.Err, jobErr)
 	}
 }
+
+// === Timeout Tests ===
+
+func TestSchedulerDefaultTimeout(t *testing.T) {
+	var mu sync.Mutex
+	var runs []CompletedRun
+
+	s := NewScheduler(
+		WithDefaultTimeout(100*time.Millisecond),
+		WithOnComplete(func(r CompletedRun) {
+			mu.Lock()
+			runs = append(runs, r)
+			mu.Unlock()
+		}),
+	)
+
+	s.Add("slow", "0 0 1 1 *", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx := context.Background()
+	s.Start(ctx)
+	defer s.Stop(ctx)
+
+	s.Trigger("slow")
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(runs)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job to complete")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	mu.Lock()
+	r := runs[0]
+	mu.Unlock()
+
+	if r.Err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if got := r.Err.Error(); got != "job timed out after 100ms" {
+		t.Errorf("err = %q, want %q", got, "job timed out after 100ms")
+	}
+}
+
+func TestSchedulerPerJobTimeout(t *testing.T) {
+	var mu sync.Mutex
+	var runs []CompletedRun
+
+	s := NewScheduler(
+		WithDefaultTimeout(10*time.Second),
+		WithOnComplete(func(r CompletedRun) {
+			mu.Lock()
+			runs = append(runs, r)
+			mu.Unlock()
+		}),
+	)
+
+	// Per-job timeout overrides the 10s default.
+	s.Add("fast-timeout", "0 0 1 1 *", func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}, Timeout(100*time.Millisecond))
+
+	ctx := context.Background()
+	s.Start(ctx)
+	defer s.Stop(ctx)
+
+	s.Trigger("fast-timeout")
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(runs)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job to complete")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	mu.Lock()
+	r := runs[0]
+	mu.Unlock()
+
+	if r.Err == nil {
+		t.Fatal("expected timeout error, got nil")
+	}
+	if got := r.Err.Error(); got != "job timed out after 100ms" {
+		t.Errorf("err = %q, want %q", got, "job timed out after 100ms")
+	}
+}
+
+func TestSchedulerTimeoutZeroDisables(t *testing.T) {
+	var called atomic.Bool
+
+	s := NewScheduler(WithDefaultTimeout(100 * time.Millisecond))
+
+	// Timeout(0) disables the default timeout for this job.
+	s.Add("no-timeout", "0 0 1 1 *", func(ctx context.Context) error {
+		time.Sleep(200 * time.Millisecond)
+		called.Store(true)
+		return nil
+	}, Timeout(0))
+
+	ctx := context.Background()
+	s.Start(ctx)
+	defer s.Stop(ctx)
+
+	s.Trigger("no-timeout")
+
+	deadline := time.After(3 * time.Second)
+	for !called.Load() {
+		select {
+		case <-deadline:
+			t.Fatal("job was not called within 3s — timeout(0) should have disabled it")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// Verify no error was recorded.
+	entries := s.Entries()
+	for _, e := range entries {
+		if e.Name == "no-timeout" && e.LastErr != nil {
+			t.Errorf("expected no error, got: %v", e.LastErr)
+		}
+	}
+}
+
+func TestSchedulerTimeoutEntryExposed(t *testing.T) {
+	s := NewScheduler(WithDefaultTimeout(5 * time.Minute))
+
+	s.Add("default-to", "* * * * *", func(ctx context.Context) error { return nil })
+	s.Add("custom-to", "* * * * *", func(ctx context.Context) error { return nil }, Timeout(30*time.Second))
+	s.Add("no-to", "* * * * *", func(ctx context.Context) error { return nil }, Timeout(0))
+
+	entries := s.Entries()
+	if entries[0].Timeout != 5*time.Minute {
+		t.Errorf("default-to timeout = %v, want 5m", entries[0].Timeout)
+	}
+	if entries[1].Timeout != 30*time.Second {
+		t.Errorf("custom-to timeout = %v, want 30s", entries[1].Timeout)
+	}
+	if entries[2].Timeout != 0 {
+		t.Errorf("no-to timeout = %v, want 0", entries[2].Timeout)
+	}
+}
+
+func TestSchedulerTimeoutJobCompleteBeforeDeadline(t *testing.T) {
+	// Job that finishes before timeout should succeed normally.
+	var mu sync.Mutex
+	var runs []CompletedRun
+
+	s := NewScheduler(
+		WithDefaultTimeout(5*time.Second),
+		WithOnComplete(func(r CompletedRun) {
+			mu.Lock()
+			runs = append(runs, r)
+			mu.Unlock()
+		}),
+	)
+
+	s.Add("quick", "0 0 1 1 *", func(ctx context.Context) error {
+		return nil
+	})
+
+	ctx := context.Background()
+	s.Start(ctx)
+	defer s.Stop(ctx)
+
+	s.Trigger("quick")
+
+	deadline := time.After(3 * time.Second)
+	for {
+		mu.Lock()
+		n := len(runs)
+		mu.Unlock()
+		if n > 0 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("timed out waiting for job to complete")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	mu.Lock()
+	r := runs[0]
+	mu.Unlock()
+
+	if r.Err != nil {
+		t.Errorf("expected nil error, got: %v", r.Err)
+	}
+}

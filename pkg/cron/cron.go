@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -23,6 +24,7 @@ type Entry struct {
 	LastRun  time.Time
 	NextRun  time.Time
 	LastErr  error
+	Timeout  time.Duration
 }
 
 // job is the internal representation of a registered cron job.
@@ -35,6 +37,23 @@ type job struct {
 	lastRun  time.Time
 	nextRun  time.Time
 	lastErr  error
+	timeout  time.Duration
+}
+
+// JobOption configures individual cron job settings.
+type JobOption func(*job)
+
+// Timeout sets the maximum execution time for a cron job. When a job
+// exceeds the timeout, its context is cancelled. Timed-out jobs are
+// recorded as failures with a descriptive error message.
+//
+// Timeout overrides the scheduler-level WithDefaultTimeout for this
+// specific job. Timeout(0) explicitly disables timeout for a job even
+// when a scheduler default is set.
+func Timeout(d time.Duration) JobOption {
+	return func(j *job) {
+		j.timeout = d
+	}
 }
 
 // CompletedRun contains information about a completed job execution. Passed to
@@ -62,15 +81,16 @@ type SchedulerStats struct {
 
 // Scheduler manages registered cron jobs and executes them on schedule.
 type Scheduler struct {
-	mu         sync.Mutex
-	jobs       []*job
-	location   *time.Location
-	logger     *log.Logger
-	onComplete func(CompletedRun)
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	started    bool
+	mu             sync.Mutex
+	jobs           []*job
+	location       *time.Location
+	logger         *log.Logger
+	onComplete     func(CompletedRun)
+	defaultTimeout time.Duration
+	ctx            context.Context
+	cancel         context.CancelFunc
+	wg             sync.WaitGroup
+	started        bool
 
 	totalCompleted atomic.Int64
 	totalFailed    atomic.Int64
@@ -106,6 +126,16 @@ func WithOnComplete(fn func(CompletedRun)) Option {
 	}
 }
 
+// WithDefaultTimeout sets the default maximum execution time for all cron
+// jobs. When a job exceeds the timeout, its context is cancelled and the
+// job fails with a "job timed out" error. Individual jobs can override
+// this with the Timeout job option.
+func WithDefaultTimeout(d time.Duration) Option {
+	return func(s *Scheduler) {
+		s.defaultTimeout = d
+	}
+}
+
 // NewScheduler creates a new cron scheduler with the given options.
 func NewScheduler(opts ...Option) *Scheduler {
 	s := &Scheduler{
@@ -119,11 +149,12 @@ func NewScheduler(opts ...Option) *Scheduler {
 
 // Add registers a named cron job with the given schedule expression. The
 // expression uses standard 5-field format: minute hour day-of-month month
-// day-of-week.
+// day-of-week. Optional JobOption values configure per-job settings like
+// Timeout.
 //
 // Add must be called before Start. Adding jobs after Start is not supported
 // and returns an error.
-func (s *Scheduler) Add(name, expr string, fn Func) error {
+func (s *Scheduler) Add(name, expr string, fn Func, opts ...JobOption) error {
 	sched, err := parse(expr)
 	if err != nil {
 		return fmt.Errorf("cron: job %q: %w", name, err)
@@ -142,12 +173,18 @@ func (s *Scheduler) Add(name, expr string, fn Func) error {
 		}
 	}
 
-	s.jobs = append(s.jobs, &job{
+	j := &job{
 		name:     name,
 		schedule: sched,
 		fn:       fn,
 		enabled:  true,
-	})
+		timeout:  s.defaultTimeout,
+	}
+	for _, opt := range opts {
+		opt(j)
+	}
+
+	s.jobs = append(s.jobs, j)
 
 	return nil
 }
@@ -234,6 +271,7 @@ func (s *Scheduler) Entries() []Entry {
 			LastRun:  j.lastRun,
 			NextRun:  j.nextRun,
 			LastErr:  j.lastErr,
+			Timeout:  j.timeout,
 		}
 	}
 	return entries
@@ -366,18 +404,33 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 	}
 }
 
-// execute runs a single job, updating its state before and after.
+// execute runs a single job, updating its state before and after. If the
+// job has a timeout configured (either per-job or scheduler default), the
+// context is wrapped with a deadline.
 func (s *Scheduler) execute(ctx context.Context, j *job) {
 	defer s.wg.Done()
 
 	s.mu.Lock()
 	j.running = true
+	timeout := j.timeout
 	s.mu.Unlock()
+
+	// Apply timeout if configured.
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
 
 	start := time.Now()
 	s.logInfo("cron job started", log.String("job", j.name))
 
 	err := s.safeRun(ctx, j)
+
+	// Wrap deadline exceeded with a descriptive message.
+	if err != nil && errors.Is(err, context.DeadlineExceeded) {
+		err = fmt.Errorf("job timed out after %s", timeout)
+	}
 
 	elapsed := time.Since(start)
 
