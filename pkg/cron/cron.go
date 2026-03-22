@@ -28,6 +28,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/stanza-go/framework/pkg/log"
@@ -69,6 +70,20 @@ type CompletedRun struct {
 	Err      error
 }
 
+// SchedulerStats holds cumulative execution counters for the scheduler. Use
+// Scheduler.Stats to obtain a snapshot.
+type SchedulerStats struct {
+	// Jobs is the total number of registered jobs.
+	Jobs int `json:"jobs"`
+	// Completed is the total number of successful job executions.
+	Completed int64 `json:"completed"`
+	// Failed is the total number of job executions that returned an error or panicked.
+	Failed int64 `json:"failed"`
+	// Skipped is the total number of times a due job was skipped because its
+	// previous execution was still running.
+	Skipped int64 `json:"skipped"`
+}
+
 // Scheduler manages registered cron jobs and executes them on schedule.
 type Scheduler struct {
 	mu         sync.Mutex
@@ -80,6 +95,10 @@ type Scheduler struct {
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	started    bool
+
+	totalCompleted atomic.Int64
+	totalFailed    atomic.Int64
+	totalSkipped   atomic.Int64
 }
 
 // Option configures a Scheduler.
@@ -244,6 +263,22 @@ func (s *Scheduler) Entries() []Entry {
 	return entries
 }
 
+// Stats returns a snapshot of cumulative execution counters. The counters are
+// cumulative since the scheduler was created. Stats is safe to call
+// concurrently from any goroutine.
+func (s *Scheduler) Stats() SchedulerStats {
+	s.mu.Lock()
+	jobs := len(s.jobs)
+	s.mu.Unlock()
+
+	return SchedulerStats{
+		Jobs:      jobs,
+		Completed: s.totalCompleted.Load(),
+		Failed:    s.totalFailed.Load(),
+		Skipped:   s.totalSkipped.Load(),
+	}
+}
+
 // Enable enables a previously disabled job by name. Returns an error if the
 // job is not found.
 func (s *Scheduler) Enable(name string) error {
@@ -335,12 +370,17 @@ func (s *Scheduler) tick(ctx context.Context, now time.Time) {
 	s.mu.Lock()
 	due := make([]*job, 0, len(s.jobs))
 	for _, j := range s.jobs {
-		if !j.enabled || j.running {
+		if !j.enabled {
 			continue
 		}
-		if !j.nextRun.IsZero() && !now.Before(j.nextRun) {
-			due = append(due, j)
+		if j.nextRun.IsZero() || now.Before(j.nextRun) {
+			continue
 		}
+		if j.running {
+			s.totalSkipped.Add(1)
+			continue
+		}
+		due = append(due, j)
 	}
 	s.mu.Unlock()
 
@@ -385,6 +425,7 @@ func (s *Scheduler) execute(ctx context.Context, j *job) {
 	}
 
 	if err != nil {
+		s.totalFailed.Add(1)
 		s.logError("cron job failed",
 			log.String("job", j.name),
 			log.Duration("elapsed", elapsed),
@@ -393,6 +434,7 @@ func (s *Scheduler) execute(ctx context.Context, j *job) {
 		return
 	}
 
+	s.totalCompleted.Add(1)
 	s.logInfo("cron job completed",
 		log.String("job", j.name),
 		log.Duration("elapsed", elapsed),
