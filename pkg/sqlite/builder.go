@@ -21,6 +21,21 @@ type joinClause struct {
 	on    string
 }
 
+// inPlaceholders returns a parenthesized comma-separated placeholder string.
+// inPlaceholders(3) returns "(?, ?, ?)".
+func inPlaceholders(n int) string {
+	var sb strings.Builder
+	sb.WriteByte('(')
+	for i := 0; i < n; i++ {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteByte('?')
+	}
+	sb.WriteByte(')')
+	return sb.String()
+}
+
 // appendWheres writes WHERE clauses to the builder and collects arguments.
 func appendWheres(sb *strings.Builder, wheres []whereClause, args []any) []any {
 	if len(wheres) == 0 {
@@ -71,6 +86,20 @@ func (b *SelectBuilder) From(table string) *SelectBuilder {
 // Use parenthesized expressions for OR: Where("(a = ? OR b = ?)", x, y).
 func (b *SelectBuilder) Where(cond string, args ...any) *SelectBuilder {
 	b.wheres = append(b.wheres, whereClause{cond: cond, args: args})
+	return b
+}
+
+// WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 0" (always false).
+func (b *SelectBuilder) WhereIn(column string, values ...any) *SelectBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 0"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
 	return b
 }
 
@@ -215,6 +244,20 @@ func (b *CountBuilder) Where(cond string, args ...any) *CountBuilder {
 	return b
 }
 
+// WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 0" (always false).
+func (b *CountBuilder) WhereIn(column string, values ...any) *CountBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 0"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
 // Build produces the SQL string and argument slice.
 func (b *CountBuilder) Build() (string, []any) {
 	var sb strings.Builder
@@ -327,6 +370,20 @@ func (b *UpdateBuilder) Where(cond string, args ...any) *UpdateBuilder {
 	return b
 }
 
+// WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 0" (always false).
+func (b *UpdateBuilder) WhereIn(column string, values ...any) *UpdateBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 0"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
+	return b
+}
+
 // Build produces the SQL string and argument slice.
 // SET arguments come before WHERE arguments in the returned slice.
 func (b *UpdateBuilder) Build() (string, []any) {
@@ -367,6 +424,20 @@ func Delete(table string) *DeleteBuilder {
 // Where adds an AND condition.
 func (b *DeleteBuilder) Where(cond string, args ...any) *DeleteBuilder {
 	b.wheres = append(b.wheres, whereClause{cond: cond, args: args})
+	return b
+}
+
+// WhereIn adds a "column IN (?, ?, ...)" condition. If values is empty,
+// the condition becomes "1 = 0" (always false).
+func (b *DeleteBuilder) WhereIn(column string, values ...any) *DeleteBuilder {
+	if len(values) == 0 {
+		b.wheres = append(b.wheres, whereClause{cond: "1 = 0"})
+		return b
+	}
+	b.wheres = append(b.wheres, whereClause{
+		cond: column + " IN " + inPlaceholders(len(values)),
+		args: values,
+	})
 	return b
 }
 

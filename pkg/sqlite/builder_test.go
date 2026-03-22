@@ -866,3 +866,161 @@ func TestSelect_GroupByNoWhere(t *testing.T) {
 		t.Errorf("args = %v, want nil", args)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// WhereIn
+// ---------------------------------------------------------------------------
+
+func TestSelect_WhereIn(t *testing.T) {
+	sql, args := Select("id", "name").
+		From("users").
+		WhereIn("id", 1, 2, 3).
+		Build()
+
+	wantSQL := "SELECT id, name FROM users WHERE id IN (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1, 2, 3}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereInSingleValue(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		WhereIn("id", 42).
+		Build()
+
+	wantSQL := "SELECT id FROM users WHERE id IN (?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{42}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereInEmpty(t *testing.T) {
+	sql, args := Select("id").
+		From("users").
+		WhereIn("id").
+		Build()
+
+	wantSQL := "SELECT id FROM users WHERE 1 = 0"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	if len(args) != 0 {
+		t.Errorf("args = %v, want empty", args)
+	}
+}
+
+func TestSelect_WhereInWithWhere(t *testing.T) {
+	sql, args := Select("id", "email").
+		From("users").
+		Where("deleted_at IS NULL").
+		WhereIn("id", 1, 2, 3).
+		OrderBy("id", "ASC").
+		Build()
+
+	wantSQL := "SELECT id, email FROM users WHERE deleted_at IS NULL AND id IN (?, ?, ?) ORDER BY id ASC"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1, 2, 3}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_WhereIn(t *testing.T) {
+	sql, args := Update("api_keys").
+		Set("revoked_at", "2026-01-01").
+		Set("updated_at", "2026-01-01").
+		WhereIn("id", "abc", "def", "ghi").
+		Build()
+
+	wantSQL := "UPDATE api_keys SET revoked_at = ?, updated_at = ? WHERE id IN (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2026-01-01", "2026-01-01", "abc", "def", "ghi"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestUpdate_WhereInWithWhere(t *testing.T) {
+	sql, args := Update("admins").
+		Set("deleted_at", "2026-01-01").
+		Set("is_active", 0).
+		Set("updated_at", "2026-01-01").
+		Where("deleted_at IS NULL").
+		WhereIn("id", 1, 2).
+		Build()
+
+	wantSQL := "UPDATE admins SET deleted_at = ?, is_active = ?, updated_at = ? WHERE deleted_at IS NULL AND id IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"2026-01-01", 0, "2026-01-01", 1, 2}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestDelete_WhereIn(t *testing.T) {
+	sql, args := Delete("notifications").
+		Where("entity_type = ?", "admin").
+		Where("entity_id = ?", "1").
+		WhereIn("id", "a", "b", "c").
+		Build()
+
+	wantSQL := "DELETE FROM notifications WHERE entity_type = ? AND entity_id = ? AND id IN (?, ?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"admin", "1", "a", "b", "c"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestCount_WhereIn(t *testing.T) {
+	sql, args := Count("users").
+		Where("is_active = ?", 1).
+		WhereIn("role", "admin", "editor").
+		Build()
+
+	wantSQL := "SELECT COUNT(*) FROM users WHERE is_active = ? AND role IN (?, ?)"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{1, "admin", "editor"}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
+
+func TestSelect_WhereInStrings(t *testing.T) {
+	// Mirrors bulk operations pattern — string IDs
+	sql, args := Select("id", "name", "email").
+		From("admins").
+		Where("deleted_at IS NULL").
+		WhereIn("id", "uuid-1", "uuid-2", "uuid-3", "uuid-4").
+		Limit(20).
+		Offset(0).
+		Build()
+
+	wantSQL := "SELECT id, name, email FROM admins WHERE deleted_at IS NULL AND id IN (?, ?, ?, ?) LIMIT ? OFFSET ?"
+	if sql != wantSQL {
+		t.Errorf("sql = %q, want %q", sql, wantSQL)
+	}
+	wantArgs := []any{"uuid-1", "uuid-2", "uuid-3", "uuid-4", 20, 0}
+	if !reflect.DeepEqual(args, wantArgs) {
+		t.Errorf("args = %v, want %v", args, wantArgs)
+	}
+}
