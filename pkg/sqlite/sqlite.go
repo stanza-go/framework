@@ -51,11 +51,15 @@ const (
 	openNoMutex   = C.SQLITE_OPEN_NOMUTEX
 )
 
-// DB is a SQLite database connection. It is safe for concurrent use;
-// all operations are serialized through a mutex. For the target scale
-// of hundreds to low thousands of users, a single connection with a
-// mutex provides simple, correct concurrency without the complexity
-// of a connection pool.
+// DB is a SQLite database connection with read/write separation. Write
+// operations (Exec, transactions) use a dedicated write connection,
+// while read operations (Query, QueryRow) use a separate read
+// connection. This lets reads proceed concurrently with writes in WAL
+// mode — HTTP reads are not blocked by cron jobs or queue workers
+// writing to the database.
+//
+// For in-memory databases (:memory:), a single connection is used
+// because each :memory: connection creates a separate database.
 //
 // DB integrates with the lifecycle package via Start and Stop methods:
 //
@@ -64,8 +68,10 @@ const (
 //	    OnStop:  db.Stop,
 //	})
 type DB struct {
-	mu             sync.Mutex
-	db             *C.sqlite3
+	mu             sync.Mutex // protects write connection
+	db             *C.sqlite3 // write connection
+	readMu         sync.Mutex // protects read connection
+	readDB         *C.sqlite3 // read connection (nil for :memory:)
 	path           string
 	opts           []Option
 	migrations     []Migration
@@ -131,30 +137,19 @@ func New(path string, opts ...Option) *DB {
 	}
 }
 
-// Start opens the database connection and configures it with WAL mode,
-// busy timeout, and any additional pragmas. The context is accepted for
-// lifecycle compatibility but is not currently used for cancellation.
+// Start opens the database connections and configures them with WAL
+// mode, busy timeout, and any additional pragmas. Two connections are
+// opened: one for writes (Exec, transactions) and one for reads
+// (Query, QueryRow). This allows reads to proceed concurrently with
+// writes in WAL mode. For in-memory databases, only a single
+// connection is used because each :memory: open creates a separate
+// database.
 func (db *DB) Start(ctx context.Context) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
 	if db.db != nil {
 		return fmt.Errorf("sqlite: already open")
-	}
-
-	cpath := C.CString(db.path)
-	defer C.free(unsafe.Pointer(cpath))
-
-	flags := C.int(openReadWrite | openCreate | openNoMutex)
-	rc := C._open(cpath, &db.db, flags)
-	if rc != resultOK {
-		var msg string
-		if db.db != nil {
-			msg = C.GoString(C._errmsg(db.db))
-			C._close(db.db)
-			db.db = nil
-		}
-		return fmt.Errorf("sqlite: open %s: %s (code %d)", db.path, msg, rc)
 	}
 
 	cfg := dbConfig{busyTimeout: 5000}
@@ -168,12 +163,53 @@ func (db *DB) Start(ctx context.Context) error {
 		db.slowThreshold = 200 * time.Millisecond
 	}
 
-	rc = C._busy_timeout(db.db, C.int(cfg.busyTimeout))
+	// Open the write connection.
+	writeConn, err := db.openConn(cfg)
+	if err != nil {
+		return err
+	}
+	db.db = writeConn
+
+	// Open a separate read connection for non-memory databases.
+	// In-memory databases create a new database per connection, so
+	// read and write must share the same connection.
+	if db.path != ":memory:" && db.path != "" {
+		readConn, err := db.openConn(cfg)
+		if err != nil {
+			C._close(db.db)
+			db.db = nil
+			return fmt.Errorf("sqlite: open read connection: %w", err)
+		}
+		db.readDB = readConn
+	}
+
+	return nil
+}
+
+// openConn opens a single SQLite connection and configures it with
+// busy timeout, default pragmas, and any user-supplied pragmas. The
+// caller must hold db.mu.
+func (db *DB) openConn(cfg dbConfig) (*C.sqlite3, error) {
+	cpath := C.CString(db.path)
+	defer C.free(unsafe.Pointer(cpath))
+
+	var conn *C.sqlite3
+	flags := C.int(openReadWrite | openCreate | openNoMutex)
+	rc := C._open(cpath, &conn, flags)
 	if rc != resultOK {
-		msg := C.GoString(C._errmsg(db.db))
-		C._close(db.db)
-		db.db = nil
-		return fmt.Errorf("sqlite: busy_timeout: %s", msg)
+		var msg string
+		if conn != nil {
+			msg = C.GoString(C._errmsg(conn))
+			C._close(conn)
+		}
+		return nil, fmt.Errorf("sqlite: open %s: %s (code %d)", db.path, msg, rc)
+	}
+
+	rc = C._busy_timeout(conn, C.int(cfg.busyTimeout))
+	if rc != resultOK {
+		msg := C.GoString(C._errmsg(conn))
+		C._close(conn)
+		return nil, fmt.Errorf("sqlite: busy_timeout: %s", msg)
 	}
 
 	// Default pragmas for performance and safety.
@@ -187,27 +223,38 @@ func (db *DB) Start(ctx context.Context) error {
 	}
 
 	for _, pragma := range defaults {
-		if err := db.execLocked(pragma); err != nil {
-			C._close(db.db)
-			db.db = nil
-			return fmt.Errorf("sqlite: %s: %w", pragma, err)
+		if err := db.execOnConn(conn, pragma); err != nil {
+			C._close(conn)
+			return nil, fmt.Errorf("sqlite: %s: %w", pragma, err)
 		}
 	}
 
 	for _, pragma := range cfg.pragmas {
-		if err := db.execLocked(pragma); err != nil {
-			C._close(db.db)
-			db.db = nil
-			return fmt.Errorf("sqlite: %s: %w", pragma, err)
+		if err := db.execOnConn(conn, pragma); err != nil {
+			C._close(conn)
+			return nil, fmt.Errorf("sqlite: %s: %w", pragma, err)
 		}
 	}
 
-	return nil
+	return conn, nil
 }
 
-// Stop closes the database connection gracefully. The context is
-// accepted for lifecycle compatibility but is not used for cancellation.
+// Stop closes both database connections gracefully. The read
+// connection is closed first, then the write connection. The context
+// is accepted for lifecycle compatibility but is not used for
+// cancellation.
 func (db *DB) Stop(ctx context.Context) error {
+	// Close the read connection first.
+	if db.readDB != nil {
+		db.readMu.Lock()
+		rc := C._close(db.readDB)
+		db.readDB = nil
+		db.readMu.Unlock()
+		if rc != resultOK {
+			return fmt.Errorf("sqlite: close read connection: code %d", rc)
+		}
+	}
+
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -224,8 +271,8 @@ func (db *DB) Stop(ctx context.Context) error {
 }
 
 // Exec executes a SQL statement that does not return rows (INSERT,
-// UPDATE, DELETE, CREATE, etc.). Use args to bind parameters using
-// positional placeholders (?).
+// UPDATE, DELETE, CREATE, etc.). Uses the write connection. Use args
+// to bind parameters using positional placeholders (?).
 func (db *DB) Exec(sql string, args ...any) (Result, error) {
 	start := time.Now()
 
@@ -236,14 +283,14 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 		return Result{}, fmt.Errorf("sqlite: database not open")
 	}
 
-	stmt, err := db.prepare(sql)
+	stmt, err := db.prepare(db.db, sql)
 	if err != nil {
 		db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 	defer C._finalize(stmt)
 
-	if err := db.bind(stmt, args); err != nil {
+	if err := db.bind(db.db, stmt, args); err != nil {
 		db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
@@ -263,36 +310,49 @@ func (db *DB) Exec(sql string, args ...any) (Result, error) {
 	return result, nil
 }
 
-// Query executes a SQL statement that returns rows (SELECT). Use args
-// to bind parameters using positional placeholders (?). The caller
-// must call Rows.Close when done iterating.
+// Query executes a SQL statement that returns rows (SELECT). Uses the
+// read connection when available (file-backed databases), falling back
+// to the write connection for in-memory databases. Use args to bind
+// parameters using positional placeholders (?). The caller must call
+// Rows.Close when done iterating.
 func (db *DB) Query(sql string, args ...any) (*Rows, error) {
+	// Use read connection if available, otherwise fall back to write.
+	if db.readDB != nil {
+		return db.queryOn(&db.readMu, db.readDB, sql, args)
+	}
+	return db.queryOn(&db.mu, db.db, sql, args)
+}
+
+// queryOn executes a query on the given connection, holding mu for the
+// lifetime of the returned Rows.
+func (db *DB) queryOn(mu *sync.Mutex, conn *C.sqlite3, sql string, args []any) (*Rows, error) {
 	start := time.Now()
 
-	db.mu.Lock()
-	// mu is held until Rows.Close is called.
+	mu.Lock()
 
-	if db.db == nil {
-		db.mu.Unlock()
+	if conn == nil {
+		mu.Unlock()
 		return nil, fmt.Errorf("sqlite: database not open")
 	}
 
-	stmt, err := db.prepare(sql)
+	stmt, err := db.prepare(conn, sql)
 	if err != nil {
 		db.logQuery(sql, time.Since(start), err)
-		db.mu.Unlock()
+		mu.Unlock()
 		return nil, err
 	}
 
-	if err := db.bind(stmt, args); err != nil {
+	if err := db.bind(conn, stmt, args); err != nil {
 		C._finalize(stmt)
 		db.logQuery(sql, time.Since(start), err)
-		db.mu.Unlock()
+		mu.Unlock()
 		return nil, err
 	}
 
 	return &Rows{
 		db:    db,
+		conn:  conn,
+		mu:    mu,
 		stmt:  stmt,
 		start: start,
 		sql:   sql,
@@ -355,15 +415,16 @@ func (db *DB) logQuery(sql string, dur time.Duration, err error) {
 	db.logger.Debug("query", fields...)
 }
 
-// prepare compiles a SQL statement. The caller must hold db.mu.
-func (db *DB) prepare(sql string) (*C.sqlite3_stmt, error) {
+// prepare compiles a SQL statement on the given connection. The caller
+// must hold the mutex that protects conn.
+func (db *DB) prepare(conn *C.sqlite3, sql string) (*C.sqlite3_stmt, error) {
 	csql := C.CString(sql)
 	defer C.free(unsafe.Pointer(csql))
 
 	var stmt *C.sqlite3_stmt
-	rc := C._prepare(db.db, csql, C.int(len(sql)), &stmt, nil)
+	rc := C._prepare(conn, csql, C.int(len(sql)), &stmt, nil)
 	if rc != resultOK {
-		return nil, fmt.Errorf("sqlite: prepare: %s", C.GoString(C._errmsg(db.db)))
+		return nil, fmt.Errorf("sqlite: prepare: %s", C.GoString(C._errmsg(conn)))
 	}
 	if stmt == nil {
 		return nil, fmt.Errorf("sqlite: prepare: empty statement")
@@ -371,8 +432,9 @@ func (db *DB) prepare(sql string) (*C.sqlite3_stmt, error) {
 	return stmt, nil
 }
 
-// bind binds args to a prepared statement. The caller must hold db.mu.
-func (db *DB) bind(stmt *C.sqlite3_stmt, args []any) error {
+// bind binds args to a prepared statement. The caller must hold the
+// mutex that protects conn. conn is used only for error messages.
+func (db *DB) bind(conn *C.sqlite3, stmt *C.sqlite3_stmt, args []any) error {
 	for i, arg := range args {
 		col := C.int(i + 1) // SQLite parameters are 1-indexed
 		var rc C.int
@@ -411,26 +473,32 @@ func (db *DB) bind(stmt *C.sqlite3_stmt, args []any) error {
 		}
 
 		if rc != resultOK {
-			return fmt.Errorf("sqlite: bind %d: %s", i, C.GoString(C._errmsg(db.db)))
+			return fmt.Errorf("sqlite: bind %d: %s", i, C.GoString(C._errmsg(conn)))
 		}
 	}
 	return nil
 }
 
-// execLocked executes a simple SQL statement without parameters.
-// The caller must hold db.mu.
-func (db *DB) execLocked(sql string) error {
+// execOnConn executes a simple SQL statement without parameters on the
+// given connection. The caller must hold the mutex that protects conn.
+func (db *DB) execOnConn(conn *C.sqlite3, sql string) error {
 	csql := C.CString(sql)
 	defer C.free(unsafe.Pointer(csql))
 
 	var errmsg *C.char
-	rc := C._exec(db.db, csql, &errmsg)
+	rc := C._exec(conn, csql, &errmsg)
 	if rc != resultOK {
 		msg := C.GoString(errmsg)
 		C.free(unsafe.Pointer(errmsg))
 		return fmt.Errorf("%s", msg)
 	}
 	return nil
+}
+
+// execLocked executes a simple SQL statement on the write connection.
+// The caller must hold db.mu.
+func (db *DB) execLocked(sql string) error {
+	return db.execOnConn(db.db, sql)
 }
 
 // Result holds the outcome of an Exec call.
@@ -440,14 +508,16 @@ type Result struct {
 }
 
 // Rows iterates over query results. When created outside a transaction,
-// it holds the database mutex for the duration of iteration, so callers
-// should close rows promptly. When created inside a transaction, the
-// transaction owns the mutex.
+// it holds a mutex (read or write) for the duration of iteration, so
+// callers should close rows promptly. When created inside a
+// transaction, mu is nil — the transaction owns the write mutex.
 //
 // Fields are ordered to minimize padding: pointers and slices first,
 // then the error interface, then bools packed together at the end.
 type Rows struct {
 	db      *DB
+	conn    *C.sqlite3    // connection this query runs on (for error messages)
+	mu      *sync.Mutex   // mutex to unlock on Close (nil if tx-owned)
 	stmt    *C.sqlite3_stmt
 	start   time.Time
 	cols    []string
@@ -456,7 +526,6 @@ type Rows struct {
 	closed  bool
 	stepped bool
 	hasRow  bool
-	tx      bool // true when rows belong to a transaction
 }
 
 // Next advances to the next row. It returns true if there is a row
@@ -473,7 +542,7 @@ func (r *Rows) Next() bool {
 	}
 	r.hasRow = false
 	if rc != resultDone {
-		r.err = fmt.Errorf("sqlite: step: %s", C.GoString(C._errmsg(r.db.db)))
+		r.err = fmt.Errorf("sqlite: step: %s", C.GoString(C._errmsg(r.conn)))
 	}
 	return false
 }
@@ -568,9 +637,9 @@ func (r *Rows) Columns() []string {
 }
 
 // Close releases the prepared statement. When rows were created outside
-// a transaction, Close also unlocks the database mutex. When rows were
-// created inside a transaction, the transaction retains the mutex.
-// It is safe to call Close multiple times.
+// a transaction, Close also unlocks the held mutex (read or write).
+// When rows were created inside a transaction, the transaction retains
+// the write mutex. It is safe to call Close multiple times.
 func (r *Rows) Close() error {
 	if r.closed {
 		return nil
@@ -578,8 +647,8 @@ func (r *Rows) Close() error {
 	r.closed = true
 	C._finalize(r.stmt)
 	r.db.logQuery(r.sql, time.Since(r.start), r.err)
-	if !r.tx {
-		r.db.mu.Unlock()
+	if r.mu != nil {
+		r.mu.Unlock()
 	}
 	return nil
 }

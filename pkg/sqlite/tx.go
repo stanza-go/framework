@@ -64,7 +64,8 @@ func (tx *Tx) Rollback() error {
 	return nil
 }
 
-// Exec executes a SQL statement within the transaction.
+// Exec executes a SQL statement within the transaction. Uses the write
+// connection held by the transaction.
 func (tx *Tx) Exec(sql string, args ...any) (Result, error) {
 	start := time.Now()
 
@@ -72,36 +73,38 @@ func (tx *Tx) Exec(sql string, args ...any) (Result, error) {
 		return Result{}, fmt.Errorf("sqlite: transaction already finished")
 	}
 
-	stmt, err := tx.db.prepare(sql)
+	conn := tx.db.db
+	stmt, err := tx.db.prepare(conn, sql)
 	if err != nil {
 		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 	defer C._finalize(stmt)
 
-	if err := tx.db.bind(stmt, args); err != nil {
+	if err := tx.db.bind(conn, stmt, args); err != nil {
 		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 
 	rc := C._step(stmt)
 	if rc != resultDone && rc != resultRow {
-		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(tx.db.db)))
+		err := fmt.Errorf("sqlite: exec: %s", C.GoString(C._errmsg(conn)))
 		tx.db.logQuery(sql, time.Since(start), err)
 		return Result{}, err
 	}
 
 	result := Result{
-		LastInsertID: int64(C._last_insert_rowid(tx.db.db)),
-		RowsAffected: int64(C._changes(tx.db.db)),
+		LastInsertID: int64(C._last_insert_rowid(conn)),
+		RowsAffected: int64(C._changes(conn)),
 	}
 	tx.db.logQuery(sql, time.Since(start), nil)
 	return result, nil
 }
 
-// Query executes a SQL query within the transaction. The caller must
-// call Rows.Close when done. Note: Rows.Close does NOT release the
-// transaction mutex — only Commit or Rollback does that.
+// Query executes a SQL query within the transaction. Uses the write
+// connection held by the transaction. The caller must call Rows.Close
+// when done. Note: Rows.Close does NOT release the transaction mutex
+// — only Commit or Rollback does that.
 func (tx *Tx) Query(sql string, args ...any) (*Rows, error) {
 	start := time.Now()
 
@@ -109,24 +112,26 @@ func (tx *Tx) Query(sql string, args ...any) (*Rows, error) {
 		return nil, fmt.Errorf("sqlite: transaction already finished")
 	}
 
-	stmt, err := tx.db.prepare(sql)
+	conn := tx.db.db
+	stmt, err := tx.db.prepare(conn, sql)
 	if err != nil {
 		tx.db.logQuery(sql, time.Since(start), err)
 		return nil, err
 	}
 
-	if err := tx.db.bind(stmt, args); err != nil {
+	if err := tx.db.bind(conn, stmt, args); err != nil {
 		C._finalize(stmt)
 		tx.db.logQuery(sql, time.Since(start), err)
 		return nil, err
 	}
 
 	return &Rows{
-		db:    tx.db,
-		stmt:  stmt,
+		db:   tx.db,
+		conn: conn,
+		mu:   nil, // transaction owns the write mutex
+		stmt: stmt,
 		start: start,
 		sql:   sql,
-		tx:    true,
 	}, nil
 }
 
@@ -149,7 +154,8 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 		return fmt.Errorf("sqlite: transaction already finished")
 	}
 
-	stmt, err := tx.db.prepare(sql)
+	conn := tx.db.db
+	stmt, err := tx.db.prepare(conn, sql)
 	if err != nil {
 		tx.db.logQuery(sql, time.Since(start), err)
 		return err
@@ -160,7 +166,7 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 		C._reset(stmt)
 		C._clear_bindings(stmt)
 
-		if err := tx.db.bind(stmt, args); err != nil {
+		if err := tx.db.bind(conn, stmt, args); err != nil {
 			err = fmt.Errorf("sqlite: exec batch item %d: %w", i, err)
 			tx.db.logQuery(sql, time.Since(start), err)
 			return err
@@ -168,7 +174,7 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 
 		rc := C._step(stmt)
 		if rc != resultDone && rc != resultRow {
-			err := fmt.Errorf("sqlite: exec batch item %d: %s", i, C.GoString(C._errmsg(tx.db.db)))
+			err := fmt.Errorf("sqlite: exec batch item %d: %s", i, C.GoString(C._errmsg(conn)))
 			tx.db.logQuery(sql, time.Since(start), err)
 			return err
 		}
