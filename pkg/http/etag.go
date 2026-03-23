@@ -75,6 +75,10 @@ func ETag(cfg ETagConfig) Middleware {
 // etagWriter buffers the response body to compute a CRC32 ETag after
 // the handler finishes. It defers WriteHeader until finish() so it can
 // decide between 200 and 304.
+//
+// For streaming responses (SSE), calling Flush switches the writer to
+// passthrough mode — buffered data is flushed and future writes go
+// directly to the underlying ResponseWriter without ETag computation.
 type etagWriter struct {
 	ResponseWriter
 	ifNoneMatch string
@@ -83,6 +87,7 @@ type etagWriter struct {
 	status      int
 	wroteHeader bool
 	hijacked    bool
+	streaming   bool
 }
 
 // Unwrap returns the underlying ResponseWriter. This allows middleware
@@ -113,18 +118,51 @@ func (ew *etagWriter) WriteHeader(code int) {
 	ew.status = code
 }
 
-// Write buffers bytes for ETag computation.
+// Write buffers bytes for ETag computation. In streaming mode, writes
+// pass through directly to the underlying ResponseWriter.
 func (ew *etagWriter) Write(b []byte) (int, error) {
 	if !ew.wroteHeader {
 		ew.WriteHeader(StatusOK)
 	}
+	if ew.streaming {
+		return ew.ResponseWriter.Write(b)
+	}
 	return ew.buf.Write(b)
+}
+
+// Flush implements http.Flusher for streaming responses such as
+// Server-Sent Events. On the first call, it abandons ETag computation,
+// writes buffered data to the underlying ResponseWriter, and switches
+// to passthrough mode for all future writes.
+func (ew *etagWriter) Flush() {
+	if ew.streaming {
+		if f, ok := ew.ResponseWriter.(nethttp.Flusher); ok {
+			f.Flush()
+		}
+		return
+	}
+
+	ew.streaming = true
+
+	if !ew.wroteHeader {
+		ew.WriteHeader(StatusOK)
+	}
+	ew.ResponseWriter.WriteHeader(ew.status)
+
+	if ew.buf.Len() > 0 {
+		_, _ = ew.ResponseWriter.Write(ew.buf.Bytes())
+		ew.buf.Reset()
+	}
+
+	if f, ok := ew.ResponseWriter.(nethttp.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // finish computes the ETag, checks If-None-Match, and writes the
 // response (either 304 or the full body with ETag header).
 func (ew *etagWriter) finish() {
-	if ew.hijacked {
+	if ew.hijacked || ew.streaming {
 		return
 	}
 

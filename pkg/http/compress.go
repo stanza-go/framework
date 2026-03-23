@@ -192,8 +192,12 @@ func (cw *compressWriter) decide() {
 }
 
 // matchesType returns true if ct starts with any of the configured
-// content-type prefixes.
+// content-type prefixes. Streaming content types (text/event-stream)
+// are excluded because gzip buffering breaks real-time delivery.
 func (cw *compressWriter) matchesType(ct string) bool {
+	if strings.HasPrefix(ct, "text/event-stream") {
+		return false
+	}
 	for _, prefix := range cw.types {
 		if strings.HasPrefix(ct, prefix) {
 			return true
@@ -237,6 +241,24 @@ func (cw *compressWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	}
 	cw.hijacked = true
 	return hj.Hijack()
+}
+
+// Flush implements http.Flusher for streaming responses such as
+// Server-Sent Events. If a compression decision has not been made,
+// it forces the decision and flushes all buffered data through to the
+// client. This ensures SSE events are delivered immediately even when
+// the Compress middleware is in the chain.
+func (cw *compressWriter) Flush() {
+	if !cw.decided {
+		cw.decide()
+		_ = cw.flush()
+	}
+	if cw.gz != nil {
+		_ = cw.gz.Flush()
+	}
+	if f, ok := cw.ResponseWriter.(nethttp.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Close finalizes the response. If compression was not decided yet
