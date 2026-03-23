@@ -4,6 +4,8 @@ import (
 	"encoding/csv"
 	"encoding/json"
 	"time"
+
+	"github.com/stanza-go/framework/pkg/log"
 )
 
 // Common HTTP status codes re-exported for convenience, so consumers
@@ -49,6 +51,28 @@ func WriteJSON(w ResponseWriter, status int, v any) {
 //	{"error": "message"}
 func WriteError(w ResponseWriter, status int, message string) {
 	WriteJSON(w, status, map[string]string{"error": message})
+}
+
+// WriteServerError logs an internal error using the request-scoped logger
+// and writes a 500 JSON error response to the client. The message is shown
+// to the client; the actual error is only logged server-side.
+//
+// Use this instead of WriteError for StatusInternalServerError — it ensures
+// the underlying error is captured in the logs for debugging while keeping
+// error details out of the response.
+//
+// Example:
+//
+//	result, err := db.Exec(sql, args...)
+//	if err != nil {
+//	    http.WriteServerError(w, r, "failed to update setting", err)
+//	    return
+//	}
+func WriteServerError(w ResponseWriter, r *Request, message string, err error) {
+	if l := log.FromContext(r.Context()); l != nil {
+		l.Error(message, log.Err(err))
+	}
+	WriteError(w, StatusInternalServerError, message)
 }
 
 // WriteCSV writes a CSV file response. It sets Content-Type and
