@@ -819,12 +819,20 @@ func (q *Queue) createTable() error {
 		return fmt.Errorf("queue: create table: %w", err)
 	}
 
-	// Add timeout_seconds column for existing databases. SQLite ignores
-	// ALTER TABLE ADD COLUMN if the column already exists in the CREATE
-	// above, so we attempt it and ignore the "duplicate column" error.
-	_, _ = q.db.Exec(
-		`ALTER TABLE _queue_jobs ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0`,
-	)
+	// Add timeout_seconds column for databases created before this column
+	// was added to the CREATE TABLE above.
+	var hasTimeout int
+	q.db.QueryRow(
+		`SELECT COUNT(*) FROM pragma_table_info('_queue_jobs') WHERE name = 'timeout_seconds'`,
+	).Scan(&hasTimeout)
+	if hasTimeout == 0 {
+		_, err = q.db.Exec(
+			`ALTER TABLE _queue_jobs ADD COLUMN timeout_seconds INTEGER NOT NULL DEFAULT 0`,
+		)
+		if err != nil {
+			return fmt.Errorf("queue: add timeout_seconds column: %w", err)
+		}
+	}
 
 	_, err = q.db.Exec(
 		`CREATE INDEX IF NOT EXISTS idx_queue_jobs_dequeue
