@@ -175,6 +175,17 @@ func (rec *responseRecorder) Write(b []byte) (int, error) {
 	return n, err
 }
 
+// Flush implements http.Flusher by delegating to the underlying
+// ResponseWriter. This is required for streaming responses (SSE) —
+// without it, Flush propagation from the Compress and ETag middleware
+// stops at the responseRecorder and buffered data never reaches the
+// client.
+func (rec *responseRecorder) Flush() {
+	if f, ok := rec.ResponseWriter.(nethttp.Flusher); ok {
+		f.Flush()
+	}
+}
+
 // SecureHeadersConfig configures the SecureHeaders middleware.
 type SecureHeadersConfig struct {
 	// FrameOptions controls the X-Frame-Options header. Common values
