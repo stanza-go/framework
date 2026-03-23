@@ -31,6 +31,7 @@ const (
 	StatusUnprocessableEntity   = 422
 	StatusTooManyRequests       = 429
 	StatusInternalServerError = 500
+	StatusBadGateway          = 502
 	StatusServiceUnavailable  = 503
 )
 
