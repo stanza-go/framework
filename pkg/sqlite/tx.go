@@ -186,6 +186,42 @@ func (tx *Tx) ExecMany(sql string, argSets [][]any) error {
 	return nil
 }
 
+// Insert executes an INSERT query within the transaction and returns
+// the last inserted row ID. Same as DB.Insert but runs on the
+// transaction's connection.
+func (tx *Tx) Insert(ib *InsertBuilder) (int64, error) {
+	sql, args := ib.Build()
+	res, err := tx.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertID, nil
+}
+
+// Update executes an UPDATE query within the transaction and returns
+// the number of affected rows. Same as DB.Update but runs on the
+// transaction's connection.
+func (tx *Tx) Update(ub *UpdateBuilder) (int64, error) {
+	sql, args := ub.Build()
+	res, err := tx.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
+}
+
+// Delete executes a DELETE query within the transaction and returns
+// the number of affected rows. Same as DB.Delete but runs on the
+// transaction's connection.
+func (tx *Tx) Delete(d *DeleteBuilder) (int64, error) {
+	sql, args := d.Build()
+	res, err := tx.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
+}
+
 // InTx runs fn inside a transaction. If fn returns nil, the
 // transaction is committed. If fn returns an error or panics,
 // the transaction is rolled back.
