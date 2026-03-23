@@ -2,6 +2,7 @@ package http
 
 import (
 	nethttp "net/http"
+	"sort"
 	"strings"
 	"sync"
 )
@@ -23,6 +24,14 @@ type Request = nethttp.Request
 // may execute logic before or after calling next.
 type Middleware func(Handler) Handler
 
+// Route describes a registered route with its HTTP method and path.
+// Routes are recorded as handlers are registered and can be retrieved
+// with Router.Routes for introspection, debugging, or documentation.
+type Route struct {
+	Method string // HTTP method (GET, POST, PUT, PATCH, DELETE) or empty for catch-all
+	Path   string // URL path pattern including parameters (e.g. "/users/{id}")
+}
+
 // Router routes HTTP requests to handlers based on method and path.
 // It supports middleware, route groups with prefixes, and path parameters.
 //
@@ -43,6 +52,7 @@ type Router struct {
 	middleware []Middleware
 	handler    Handler
 	buildOnce  sync.Once
+	routes     []Route
 }
 
 // NewRouter creates a new Router.
@@ -62,12 +72,34 @@ func (r *Router) Use(mw ...Middleware) {
 // Handle registers a handler for the given pattern. Patterns follow
 // Go 1.22+ ServeMux syntax: "METHOD /path", "/path", "GET /path/{id}".
 func (r *Router) Handle(pattern string, handler Handler) {
+	r.record(pattern)
 	r.mux.Handle(pattern, handler)
 }
 
 // HandleFunc registers a handler function for the given pattern.
 func (r *Router) HandleFunc(pattern string, handler func(ResponseWriter, *Request)) {
+	r.record(pattern)
 	r.mux.HandleFunc(pattern, handler)
+}
+
+// Routes returns all registered routes sorted by path then method.
+// The returned slice is a copy — callers may modify it freely.
+func (r *Router) Routes() []Route {
+	out := make([]Route, len(r.routes))
+	copy(out, r.routes)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Path != out[j].Path {
+			return out[i].Path < out[j].Path
+		}
+		return out[i].Method < out[j].Method
+	})
+	return out
+}
+
+// record adds a route entry from the given pattern.
+func (r *Router) record(pattern string) {
+	method, path := parsePattern(pattern)
+	r.routes = append(r.routes, Route{Method: method, Path: path})
 }
 
 // Group creates a route group with the given path prefix. Routes added
@@ -114,8 +146,10 @@ func (g *Group) Use(mw ...Middleware) {
 // Handle registers a handler in the group. The group's prefix is
 // prepended to the pattern's path, and all group middleware is applied.
 func (g *Group) Handle(pattern string, handler Handler) {
+	full := g.fullPattern(pattern)
 	handler = chain(g.allMiddleware(), handler)
-	g.router.mux.Handle(g.fullPattern(pattern), handler)
+	g.router.record(full)
+	g.router.mux.Handle(full, handler)
 }
 
 // HandleFunc registers a handler function in the group.

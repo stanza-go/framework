@@ -25,4 +25,10 @@
 //	api := r.Group("/api")
 //	api.Use(authMiddleware)
 //	api.HandleFunc("GET /users", listUsers)
+//
+// Inspect registered routes for debugging or documentation:
+//
+//	for _, route := range r.Routes() {
+//	    fmt.Printf("%s %s\n", route.Method, route.Path)
+//	}
 package http
