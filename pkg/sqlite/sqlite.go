@@ -565,12 +565,19 @@ func (db *DB) Stats() DBStats {
 	return s
 }
 
+// FormatTime converts a time.Time to a UTC RFC 3339 string suitable for
+// storing in SQLite columns. It normalizes to UTC so all database
+// timestamps are in the same timezone regardless of the input.
+func FormatTime(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
 // Now returns the current UTC time formatted as an RFC 3339 string.
 // Use this when storing timestamps in SQLite columns — it produces
 // the canonical format used throughout the application for created_at,
 // updated_at, deleted_at, and similar fields.
 func Now() string {
-	return time.Now().UTC().Format(time.RFC3339)
+	return FormatTime(time.Now())
 }
 
 // Optimize runs PRAGMA optimize, which analyzes tables that the query
