@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -623,6 +624,36 @@ func Now() string {
 // to audit logging, or included in string slices such as CSV export rows.
 func FormatID(id int64) string {
 	return strconv.FormatInt(id, 10)
+}
+
+// IntegrityCheck runs PRAGMA integrity_check on the database. It
+// returns nil when the database is healthy (the single-row "ok"
+// result). If corruption or structural issues are found, the returned
+// error contains the diagnostic messages joined by newlines.
+func (db *DB) IntegrityCheck() error {
+	rows, err := db.Query("PRAGMA integrity_check")
+	if err != nil {
+		return fmt.Errorf("sqlite: integrity_check: %w", err)
+	}
+	defer rows.Close()
+
+	var messages []string
+	for rows.Next() {
+		var msg string
+		if err := rows.Scan(&msg); err != nil {
+			return fmt.Errorf("sqlite: integrity_check scan: %w", err)
+		}
+		messages = append(messages, msg)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("sqlite: integrity_check rows: %w", err)
+	}
+
+	if len(messages) == 1 && messages[0] == "ok" {
+		return nil
+	}
+
+	return fmt.Errorf("sqlite: integrity_check failed:\n%s", strings.Join(messages, "\n"))
 }
 
 // Optimize runs PRAGMA optimize, which analyzes tables that the query
