@@ -2,6 +2,7 @@ package validate
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -140,6 +141,42 @@ func URL(field, value string) *FieldError {
 	if err != nil || u.Host == "" {
 		return &FieldError{Field: field, Message: "must be a valid URL"}
 	}
+	return nil
+}
+
+// PublicURL checks that a string value is a valid HTTP or HTTPS URL
+// pointing to a public host. It rejects URLs with loopback addresses
+// (127.x, ::1), private network addresses (10.x, 172.16-31.x,
+// 192.168.x), link-local addresses (169.254.x, fe80::), and reserved
+// hostnames (localhost, *.local). Use this for webhook URLs and other
+// cases where the server will make outbound requests to user-supplied
+// URLs, to prevent SSRF attacks.
+// An empty value is considered valid — use Required to enforce presence.
+func PublicURL(field, value string) *FieldError {
+	if fe := URL(field, value); fe != nil {
+		return fe
+	}
+	if value == "" {
+		return nil
+	}
+
+	u, _ := url.Parse(value)
+	host := u.Hostname()
+
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+			ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return &FieldError{Field: field, Message: "must not point to a private or reserved address"}
+		}
+		return nil
+	}
+
+	lower := strings.ToLower(host)
+	if lower == "localhost" || strings.HasSuffix(lower, ".local") ||
+		strings.HasSuffix(lower, ".localhost") || strings.HasSuffix(lower, ".internal") {
+		return &FieldError{Field: field, Message: "must not point to a private or reserved address"}
+	}
+
 	return nil
 }
 
