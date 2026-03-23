@@ -115,6 +115,22 @@ func ReadJSONLimit(r *Request, v any, maxBytes int64) error {
 	return nil
 }
 
+// BindJSON reads the JSON request body into v. If the body is missing,
+// malformed, or exceeds 1 MB, it writes a 400 error response and returns
+// false. The caller should return immediately when false:
+//
+//	var req createRequest
+//	if !http.BindJSON(w, r, &req) {
+//	    return
+//	}
+func BindJSON(w ResponseWriter, r *Request, v any) bool {
+	if err := ReadJSON(r, v); err != nil {
+		WriteError(w, StatusBadRequest, "invalid request body")
+		return false
+	}
+	return true
+}
+
 // PathParamInt64 parses a path parameter as an int64. If the value is
 // missing or not a valid integer, it writes a 400 error response and
 // returns false. The caller should return immediately when false:
