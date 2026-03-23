@@ -21,6 +21,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -533,6 +534,42 @@ func (db *DB) Count(sb *SelectBuilder) (int, error) {
 	return n, err
 }
 
+// Insert executes an INSERT query and returns the last inserted row ID.
+// It combines Build and Exec into a single call — the common pattern for
+// create handlers.
+func (db *DB) Insert(ib *InsertBuilder) (int64, error) {
+	sql, args := ib.Build()
+	res, err := db.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertID, nil
+}
+
+// Update executes an UPDATE query and returns the number of affected rows.
+// It combines Build and Exec into a single call — the common pattern for
+// update and soft-delete handlers.
+func (db *DB) Update(ub *UpdateBuilder) (int64, error) {
+	sql, args := ub.Build()
+	res, err := db.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
+}
+
+// Delete executes a DELETE query and returns the number of affected rows.
+// It combines Build and Exec into a single call — the common pattern for
+// hard-delete and purge handlers.
+func (db *DB) Delete(d *DeleteBuilder) (int64, error) {
+	sql, args := d.Build()
+	res, err := db.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
+}
+
 // Path returns the database file path.
 func (db *DB) Path() string {
 	return db.path
@@ -578,6 +615,14 @@ func FormatTime(t time.Time) string {
 // updated_at, deleted_at, and similar fields.
 func Now() string {
 	return FormatTime(time.Now())
+}
+
+// FormatID converts an int64 database ID to its string representation.
+// Use this when an integer primary key needs to be compared against a
+// TEXT column (entity_id in refresh_tokens, audit_log, etc.), passed
+// to audit logging, or included in string slices such as CSV export rows.
+func FormatID(id int64) string {
+	return strconv.FormatInt(id, 10)
 }
 
 // Optimize runs PRAGMA optimize, which analyzes tables that the query
