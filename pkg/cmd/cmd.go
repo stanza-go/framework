@@ -10,17 +10,19 @@ import (
 // App is the top-level command-line application. It holds registered commands
 // and handles argument parsing, dispatch, and help generation.
 type App struct {
-	name     string
-	version  string
-	desc     string
-	commands []*Command
-	out      io.Writer
+	name       string
+	version    string
+	desc       string
+	defaultCmd string
+	commands   []*Command
+	out        io.Writer
 }
 
 type config struct {
-	version string
-	desc    string
-	out     io.Writer
+	version    string
+	desc       string
+	out        io.Writer
+	defaultCmd string
 }
 
 // Option configures an App.
@@ -48,6 +50,15 @@ func WithOutput(w io.Writer) Option {
 	}
 }
 
+// WithDefaultCommand sets the command to run when no subcommand is given.
+// Without this option, running the app with no arguments prints help.
+// With it, the named command is dispatched automatically.
+func WithDefaultCommand(name string) Option {
+	return func(c *config) {
+		c.defaultCmd = name
+	}
+}
+
 // New creates a new App with the given name and options.
 func New(name string, opts ...Option) *App {
 	cfg := config{
@@ -57,10 +68,11 @@ func New(name string, opts ...Option) *App {
 		opt(&cfg)
 	}
 	return &App{
-		name:    name,
-		version: cfg.version,
-		desc:    cfg.desc,
-		out:     cfg.out,
+		name:       name,
+		version:    cfg.version,
+		desc:       cfg.desc,
+		out:        cfg.out,
+		defaultCmd: cfg.defaultCmd,
 	}
 }
 
@@ -83,6 +95,13 @@ func (a *App) Run(args []string) error {
 	}
 
 	if len(args) == 0 {
+		if a.defaultCmd != "" {
+			for _, c := range a.commands {
+				if c.name == a.defaultCmd {
+					return a.dispatch(c, nil, []string{a.name})
+				}
+			}
+		}
 		a.printHelp()
 		return nil
 	}
