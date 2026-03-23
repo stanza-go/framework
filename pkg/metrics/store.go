@@ -212,7 +212,8 @@ func (s *Store) Stats() StoreStats {
 }
 
 // flush drains the in-memory buffer to disk, sorted by timestamp and
-// grouped by daily partition.
+// grouped by daily partition. If any partition write fails, the failed
+// samples are returned to the buffer for retry on the next flush cycle.
 func (s *Store) flush() error {
 	s.mu.Lock()
 	if len(s.buffer) == 0 {
@@ -235,17 +236,35 @@ func (s *Store) flush() error {
 		groups[date] = append(groups[date], sm)
 	}
 
+	var failed []sample
+	var firstErr error
+
 	for date, samples := range groups {
 		p, err := s.getOrCreatePartition(date)
 		if err != nil {
-			return err
+			failed = append(failed, samples...)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if err := p.append(samples); err != nil {
-			return err
+			failed = append(failed, samples...)
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 	}
 
-	return nil
+	// Return failed samples to the buffer for retry.
+	if len(failed) > 0 {
+		s.mu.Lock()
+		s.buffer = append(failed, s.buffer...)
+		s.mu.Unlock()
+	}
+
+	return firstErr
 }
 
 func (s *Store) getOrCreatePartition(date string) (*partition, error) {

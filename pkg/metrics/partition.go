@@ -60,6 +60,10 @@ func openPartition(dir string) (*partition, error) {
 
 // append writes a batch of samples to the partition's column files.
 // Samples must be sorted by timestamp before calling.
+//
+// If any column file write fails, previously written columns in the same
+// batch are truncated back to their original size to keep all three files
+// aligned. This prevents silent data corruption from partial writes.
 func (p *partition) append(samples []sample) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -76,13 +80,24 @@ func (p *partition) append(samples []sample) error {
 		binary.LittleEndian.PutUint64(valBuf[off:], math.Float64bits(s.value))
 	}
 
+	// Record original sizes so we can rollback on partial failure.
+	tsInfo, _ := p.tsFile.Stat()
+	tsOrigSize := tsInfo.Size()
+	sidInfo, _ := p.sidFile.Stat()
+	sidOrigSize := sidInfo.Size()
+
 	if _, err := p.tsFile.Write(tsBuf); err != nil {
+		p.tsFile.Truncate(tsOrigSize)
 		return err
 	}
 	if _, err := p.sidFile.Write(sidBuf); err != nil {
+		p.tsFile.Truncate(tsOrigSize)
+		p.sidFile.Truncate(sidOrigSize)
 		return err
 	}
 	if _, err := p.valFile.Write(valBuf); err != nil {
+		p.tsFile.Truncate(tsOrigSize)
+		p.sidFile.Truncate(sidOrigSize)
 		return err
 	}
 

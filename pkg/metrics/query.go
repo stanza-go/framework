@@ -1,10 +1,13 @@
 package metrics
 
 import (
+	"errors"
 	"math"
 	"os"
 	"sort"
 )
+
+const maxBuckets = 100_000 // safety cap on aggregation buckets per query
 
 // Query executes a metrics query and returns the matching data, optionally
 // aggregated into time buckets.
@@ -21,6 +24,14 @@ import (
 //	    Fn:    metrics.Avg,
 //	})
 func (s *Store) Query(q Query) (*Result, error) {
+	if q.Step > 0 {
+		rangeMs := q.End.UnixMilli() - q.Start.UnixMilli()
+		buckets := rangeMs/q.Step.Milliseconds() + 1
+		if buckets > maxBuckets {
+			return nil, errors.New("query step too small for time range (would exceed 100k buckets)")
+		}
+	}
+
 	matchIDs := s.series.matchingSeries(q.Name, q.Labels)
 	if len(matchIDs) == 0 {
 		return &Result{}, nil
