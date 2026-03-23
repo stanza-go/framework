@@ -4,6 +4,7 @@ import (
 	nethttp "net/http"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // SSEWriter writes Server-Sent Events to an HTTP response. Create one
@@ -31,7 +32,21 @@ type SSEWriter struct {
 // headers to the client immediately. If the underlying ResponseWriter
 // supports flushing (including through middleware wrappers), events
 // are flushed after each write.
+//
+// NewSSEWriter automatically clears the server's write deadline so
+// the stream is not killed by the server's WriteTimeout (typically
+// 15 seconds). WebSocket connections avoid this because they hijack
+// the connection; SSE uses the regular ResponseWriter and needs an
+// explicit deadline reset.
 func NewSSEWriter(w ResponseWriter) *SSEWriter {
+	// Clear the write deadline set by the server's WriteTimeout.
+	// SSE streams are long-lived — the server's default timeout
+	// (e.g. 15s) would kill the connection mid-stream. Using
+	// ResponseController walks the middleware Unwrap chain to reach
+	// the underlying net.Conn and reset its deadline.
+	rc := nethttp.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Time{})
+
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
