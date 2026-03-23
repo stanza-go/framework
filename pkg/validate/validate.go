@@ -51,6 +51,20 @@ func (v *Validator) Errors() map[string]string {
 	return v.errors
 }
 
+// Add appends additional field checks to an existing Validator. Only
+// the first error per field is kept.
+func (v *Validator) Add(checks ...*FieldError) {
+	for _, fe := range checks {
+		if fe == nil {
+			continue
+		}
+		if _, exists := v.errors[fe.Field]; !exists {
+			v.errors[fe.Field] = fe.Message
+			v.order = append(v.order, fe.Field)
+		}
+	}
+}
+
 // WriteError writes a 422 JSON response with field-level errors.
 // The response body is:
 //
@@ -224,6 +238,27 @@ func FutureDate(field, value string) *FieldError {
 	}
 	if !t.After(time.Now().UTC()) {
 		return &FieldError{Field: field, Message: "must be a date in the future"}
+	}
+	return nil
+}
+
+// Slug checks that a string value is a valid URL slug: lowercase
+// alphanumeric characters and hyphens, starting and ending with an
+// alphanumeric character. An empty value is considered valid — use
+// Required to enforce presence.
+func Slug(field, value string) *FieldError {
+	if value == "" {
+		return nil
+	}
+	for i, c := range value {
+		isAlnum := (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		isHyphen := c == '-'
+		if !isAlnum && !isHyphen {
+			return &FieldError{Field: field, Message: "must contain only lowercase letters, numbers, and hyphens"}
+		}
+		if isHyphen && (i == 0 || i == len(value)-1) {
+			return &FieldError{Field: field, Message: "must start and end with a letter or number"}
+		}
 	}
 	return nil
 }

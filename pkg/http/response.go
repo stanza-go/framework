@@ -14,7 +14,12 @@ const (
 	StatusOK                  = 200
 	StatusCreated             = 201
 	StatusNoContent           = 204
+	StatusMovedPermanently    = 301
+	StatusFound               = 302
+	StatusSeeOther            = 303
 	StatusNotModified         = 304
+	StatusTemporaryRedirect   = 307
+	StatusPermanentRedirect   = 308
 	StatusBadRequest          = 400
 	StatusUnauthorized        = 401
 	StatusForbidden           = 403
