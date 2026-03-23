@@ -136,6 +136,17 @@ func HashToken(token string) string {
 	return hex.EncodeToString(h[:])
 }
 
+// GenerateID creates a cryptographically random identifier (16 bytes,
+// hex-encoded to 32 characters). Use this for database record IDs,
+// session identifiers, and other cases that need a unique random key.
+func GenerateID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("auth: generate id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // GenerateAPIKey creates a cryptographically random API key with the
 // given prefix (e.g., "stza_"). It returns the full key, a short
 // display prefix for identification, and the SHA-256 hash for storage.
