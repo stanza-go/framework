@@ -205,6 +205,34 @@ func appendWheres(sb *strings.Builder, wheres []whereClause, args []any) []any {
 }
 
 // ---------------------------------------------------------------------------
+// Execution interfaces
+// ---------------------------------------------------------------------------
+
+// Execer is satisfied by DB and Tx. Write builders (Insert, Update, Delete)
+// accept it so you can chain execution directly:
+//
+//	sqlite.Insert("users").Set("name", "Alice").Exec(db)
+//	sqlite.Update("users").Set("name", "Bob").Where("id = ?", 1).Exec(tx)
+//
+// Do NOT call db.Exec(builder.Build()) — Go's multi-return-to-variadic
+// forwarding wraps the argument slice as a single element, silently losing
+// all query parameters.
+type Execer interface {
+	Exec(sql string, args ...any) (Result, error)
+}
+
+// Querier is satisfied by DB and Tx. Read builders (Select, Count) accept
+// it so you can chain execution directly:
+//
+//	rows, err := sqlite.Select("id", "name").From("users").Query(db)
+//	var count int
+//	sqlite.Count("users").Where("active = ?", true).QueryRow(db).Scan(&count)
+type Querier interface {
+	Query(sql string, args ...any) (*Rows, error)
+	QueryRow(sql string, args ...any) *Row
+}
+
+// ---------------------------------------------------------------------------
 // SELECT
 // ---------------------------------------------------------------------------
 
@@ -477,6 +505,25 @@ func (b *SelectBuilder) Build() (string, []any) {
 	return sb.String(), args
 }
 
+// Query executes the SELECT and returns rows for iteration. Accepts DB or Tx.
+//
+//	rows, err := sqlite.Select("id", "name").From("users").
+//	    Where("active = ?", true).Query(db)
+func (b *SelectBuilder) Query(q Querier) (*Rows, error) {
+	sql, args := b.Build()
+	return q.Query(sql, args...)
+}
+
+// QueryRow executes the SELECT and returns a single row. Accepts DB or Tx.
+//
+//	var name string
+//	err := sqlite.Select("name").From("users").
+//	    Where("id = ?", id).QueryRow(db).Scan(&name)
+func (b *SelectBuilder) QueryRow(q Querier) *Row {
+	sql, args := b.Build()
+	return q.QueryRow(sql, args...)
+}
+
 // ---------------------------------------------------------------------------
 // COUNT
 // ---------------------------------------------------------------------------
@@ -611,6 +658,16 @@ func (b *CountBuilder) Build() (string, []any) {
 	return sb.String(), args
 }
 
+// Count executes the COUNT query and returns the count. Accepts DB or Tx.
+//
+//	total, err := sqlite.Count("users").Where("active = ?", true).Count(db)
+func (b *CountBuilder) Count(q Querier) (int, error) {
+	sql, args := b.Build()
+	var n int
+	err := q.QueryRow(sql, args...).Scan(&n)
+	return n, err
+}
+
 // ---------------------------------------------------------------------------
 // INSERT
 // ---------------------------------------------------------------------------
@@ -703,6 +760,18 @@ func (b *InsertBuilder) Build() (string, []any) {
 	}
 
 	return sb.String(), b.values
+}
+
+// Exec executes the INSERT and returns the last inserted row ID. Accepts DB or Tx.
+//
+//	id, err := sqlite.Insert("users").Set("name", "Alice").Exec(db)
+func (b *InsertBuilder) Exec(e Execer) (int64, error) {
+	sql, args := b.Build()
+	res, err := e.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertID, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -805,6 +874,23 @@ func (b *InsertBatchBuilder) Build() (string, []any) {
 	}
 
 	return sb.String(), args
+}
+
+// Exec executes the batch INSERT and returns the last inserted row ID.
+// Accepts DB or Tx.
+//
+//	id, err := sqlite.InsertBatch("settings").
+//	    Columns("key", "value").
+//	    Row("site_name", "Stanza").
+//	    Row("site_url", "https://stanza.dev").
+//	    Exec(db)
+func (b *InsertBatchBuilder) Exec(e Execer) (int64, error) {
+	sql, args := b.Build()
+	res, err := e.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertID, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -959,6 +1045,20 @@ func (b *UpdateBuilder) Build() (string, []any) {
 	return sb.String(), args
 }
 
+// Exec executes the UPDATE and returns the number of rows affected.
+// Accepts DB or Tx.
+//
+//	n, err := sqlite.Update("users").Set("name", "Bob").
+//	    Where("id = ?", id).Exec(db)
+func (b *UpdateBuilder) Exec(e Execer) (int64, error) {
+	sql, args := b.Build()
+	res, err := e.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
+}
+
 // ---------------------------------------------------------------------------
 // DELETE
 // ---------------------------------------------------------------------------
@@ -1077,4 +1177,17 @@ func (b *DeleteBuilder) Build() (string, []any) {
 	args = appendWheres(&sb, b.wheres, args)
 
 	return sb.String(), args
+}
+
+// Exec executes the DELETE and returns the number of rows affected.
+// Accepts DB or Tx.
+//
+//	n, err := sqlite.Delete("users").Where("id = ?", id).Exec(db)
+func (b *DeleteBuilder) Exec(e Execer) (int64, error) {
+	sql, args := b.Build()
+	res, err := e.Exec(sql, args...)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected, nil
 }
